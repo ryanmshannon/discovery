@@ -1,4 +1,5 @@
 import numpy as np
+import jax.numpy as jnp
 import re
 
 from .. import matrix
@@ -7,6 +8,7 @@ from .. import prior
 from .. import solar
 from .. import likelihood
 from .. import deterministic
+from .. import const
 
 def write_ml_json(df, savename):
     import json
@@ -55,7 +57,7 @@ def update_priordict_standard_mpta():
         'curn_log10_A':             [-18, -11],
         'curn_gamma':               [0, 7],
         # deterministic parameters
-        '(.*_)?chrom_exp_t0': [58525, 60700], # MPTA 6-yr range
+        '(.*_)?chrom_exp_t0': [58525, 60900], # MPTA 6-yr range
         '(.*_)?chrom_exp_log10_Amp': [-10, -4],
         '(.*_)?chrom_exp_log10_tau': [0, 4],
         '(.*_)?chrom_exp_sign_param': [-1, 1],
@@ -63,7 +65,7 @@ def update_priordict_standard_mpta():
         '(.*_)?chrom_1yr_log10_Amp': [-10, -4],
         '(.*_)?chrom_1yr_phase': [0, 2 * np.pi],
         '(.*_)?chrom_1yr_alpha': [0, 7],
-        '(.*_)?chrom_gauss_t0': [58525, 60700], # MPTA 6-yr range
+        '(.*_)?chrom_gauss_t0': [58525, 60900], # MPTA 6-yr range
         '(.*_)?chrom_gauss_log10_Amp': [-10, -4],
         '(.*_)?chrom_gauss_log10_sigma': [0, 4],
         '(.*_)?chrom_gauss_sign_param': [-1, 1],
@@ -165,7 +167,6 @@ def single_pulsar_noise(psr, fftint=True, max_cadence_days=14, Tspan=None, noise
     else:
         model_components += make_psr_gps_fourier(psr, max_cadence_days=max_cadence_days, Tspan=Tspan, background=background, red=red, red2=red2, dm=dm, chrom=chrom, sw=sw, dm_sw_free=dm_sw_free, band=band, band_low=band_low, band_alpha=band_alpha)
     if extra_gps is not None:
-        print("Adding extra GPs")
         model_components += extra_gps
 
     comp_params = []
