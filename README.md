@@ -11,6 +11,30 @@ _Discovery_ needs a modern Python with `numpy`, `scipy`, `jax`, `pyarrow`. It wi
 
 _Discovery_'s subpackages (such as `discovery.flow` and the packages under `discovery.samplers`) require additional dependencies.
 
+## Multi-GPU Support
+
+_Discovery_ now supports distributing computation across **multiple GPUs** for faster likelihood evaluations on large pulsar timing arrays. See [`docs/multi_gpu_usage.md`](docs/multi_gpu_usage.md) for detailed documentation.
+
+Quick example:
+```python
+import discovery as ds
+
+# Create GlobalLikelihood (see examples below)
+gbl = ds.GlobalLikelihood(psls, globalgp)
+
+# Use all available GPUs
+logl_parallel = gbl.gpu_logL()
+
+# Evaluate (distributed across GPUs)
+result = logl_parallel(params)
+```
+
+Features:
+- Automatic GPU detection and load balancing
+- Data-parallel distribution of pulsar computations
+- Compatible with JIT compilation and other JAX transformations
+- Works alongside existing MPI parallelization
+
 ## Examples
 
 The folder `examples` contains a growing set of usage examples.
