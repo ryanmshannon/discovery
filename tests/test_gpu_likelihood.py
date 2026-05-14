@@ -21,16 +21,6 @@ class TestGPULikelihoodBasic:
         # Create a minimal GlobalLikelihood
         # This is just a structural test, no actual computation
         assert hasattr(ds.GlobalLikelihood, 'gpu_logL')
-    
-    def test_gpu_logl_requires_devices(self, monkeypatch):
-        """Test that gpu_logL raises error when no GPUs available."""
-        # Mock get_gpu_devices to return empty list
-        monkeypatch.setattr(gpu_utils, "get_gpu_devices", lambda: [])
-        
-        # Create a minimal test case with mock pulsars
-        # Note: This would need actual pulsar data for a full test
-        # For now, we're just testing the error handling
-        pass  # Placeholder for when we have test data
 
 
 @pytest.mark.gpu
@@ -44,72 +34,24 @@ class TestGPULikelihoodWithHardware:
         if not available:
             pytest.skip(f"Need multiple GPUs, only {num_gpus} available")
     
-    @pytest.fixture
-    def mock_pulsar_data(self):
-        """Create mock pulsar data for testing.
-        
-        This is a simplified version. Real tests would use actual
-        pulsar timing data from the data/ folder.
-        """
-        # Create minimal mock pulsar-like objects
-        # In real usage, these would be ds.Pulsar objects
-        class MockPulsar:
-            def __init__(self, n_toas=100):
-                self.residuals = jnp.array(np.random.randn(n_toas))
-                self.noisedict = {}
-        
-        return [MockPulsar() for _ in range(4)]
-    
-    def test_gpu_logl_creation(self):
-        """Test that gpu_logL can be created."""
-        # This is a placeholder for actual implementation test
-        # Would need real pulsar data
-        pass
-    
-    def test_gpu_logl_device_specification(self):
-        """Test specifying number of devices."""
-        # Test with specific device count
-        num_gpus = gpu_utils.get_num_gpus()
-        assert num_gpus >= 2, "Need at least 2 GPUs for this test"
-        
-        # Placeholder for actual test with real data
-        pass
+    # Note: Comprehensive GPU tests would require actual pulsar data
+    # These are placeholders for future implementation when test data is available
 
 
 class TestGPULikelihoodIntegration:
     """Integration tests for GPU likelihood with other Discovery components."""
     
-    def test_gpu_logl_has_params_attribute(self):
-        """Test that gpu_logL result has params attribute like normal logL."""
-        # Placeholder - would need actual GlobalLikelihood instance
-        pass
-    
-    def test_gpu_logl_compatible_with_jit(self):
-        """Test that gpu_logL result can be JIT compiled."""
-        # Placeholder - would test jax.jit(logl_parallel)
-        pass
+    # Note: These tests require actual pulsar data from the data/ folder
+    # They are placeholders for future implementation
+    pass
 
 
 class TestGPULikelihoodErrorHandling:
     """Tests for error handling in gpu_logL."""
     
-    def test_gpu_logl_fewer_pulsars_than_devices(self, monkeypatch):
-        """Test error when pulsars < devices."""
-        # Mock to simulate having many GPUs
-        def mock_get_gpu_devices():
-            # Return mock device list
-            return [f"gpu:{i}" for i in range(10)]
-        
-        monkeypatch.setattr(gpu_utils, "get_gpu_devices", mock_get_gpu_devices)
-        
-        # Would test that appropriate error is raised
-        # when trying to use 10 GPUs with only 5 pulsars
-        pass
-    
-    def test_gpu_logl_warns_uneven_distribution(self):
-        """Test warning when pulsars not evenly divisible by devices."""
-        # Test that warning is issued for suboptimal distribution
-        pass
+    # Note: These tests require mock pulsar data structures
+    # They are placeholders for future implementation  
+    pass
 
 
 class TestGPULikelihoodPerformance:

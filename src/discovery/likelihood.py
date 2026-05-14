@@ -524,19 +524,10 @@ class GlobalLikelihood:
                 end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
                 logl_groups.append(logls[start_idx:end_idx])
             
-            # Create function that computes sum for one group
-            def compute_group_logl(logl_group, params):
-                return sum(logl(params) for logl in logl_group)
-            
-            # Parallelize across devices
-            @functools.partial(jax.pmap, devices=device_list, in_axes=(None,))
-            def parallel_logl_simple(params):
-                # This gets replicated to all devices but each device only uses its group
-                # We need a different approach - can't pass different data to each device with pmap directly
-                # Instead, we'll use vmap over groups then manually distribute
-                raise NotImplementedError("Simple pmap approach needs restructuring")
-            
-            # Better approach: manually distribute and sum
+            # Create likelihood function that distributes work across groups
+            # In the future, this could use pmap for true multi-device parallelism
+            # For now, groups are evaluated sequentially which still benefits from
+            # JAX's device placement when data is explicitly moved to devices
             def loglike(params):
                 results = []
                 for group in logl_groups:
