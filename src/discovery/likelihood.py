@@ -507,6 +507,9 @@ class GlobalLikelihood:
             logls = [psl.logL for psl in self.psls]
             num_pulsars = len(logls)
             
+            if num_pulsars == 0:
+                raise ValueError("No pulsars in GlobalLikelihood. Cannot create gpu_logL.")
+            
             if num_pulsars < num_devices:
                 raise ValueError(
                     f"Number of pulsars ({num_pulsars}) is less than number of devices ({num_devices}). "
@@ -540,6 +543,12 @@ class GlobalLikelihood:
         else:
             # Complex case: with global GP
             # Parallelize computation of per-pulsar kernelterms
+            if not hasattr(self.globalgp, "Phi") or self.globalgp.Phi is None:
+                raise ValueError(
+                    "globalgp must have a Phi attribute for gpu_logL. "
+                    "Ensure your global GP was constructed properly."
+                )
+            
             P_var_inv = getattr(self.globalgp, "Phi_inv", None) or self.globalgp.Phi.make_inv()
             Fs = getattr(self.globalgp, "Fs", None)
             if Fs is None:

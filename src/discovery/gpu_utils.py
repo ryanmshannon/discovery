@@ -42,6 +42,10 @@ def setup_gpu_environment(gpu_ids: Optional[List[int]] = None) -> List[Any]:
     This function configures JAX to use specific GPUs if requested,
     or all available GPUs otherwise.
     
+    **Important**: Call this function before importing or using JAX for the first time,
+    or before any JAX operations that would initialize CUDA. Setting environment
+    variables after JAX has initialized devices may not take effect.
+    
     Args:
         gpu_ids: Optional list of GPU IDs to use (e.g., [0, 1, 2]).
                 If None, all available GPUs will be used.
@@ -50,11 +54,27 @@ def setup_gpu_environment(gpu_ids: Optional[List[int]] = None) -> List[Any]:
         List of configured GPU devices.
     
     Example:
+        >>> # Call this early in your script, before JAX operations
         >>> devices = setup_gpu_environment([0, 1])
         >>> print(f"Using {len(devices)} GPUs")
     """
     if gpu_ids is not None:
         # Set CUDA_VISIBLE_DEVICES to restrict to specific GPUs
+        # Warn if JAX may have already initialized
+        try:
+            # Check if JAX has already created devices
+            existing_devices = jax.devices()
+            if len(existing_devices) > 0:
+                warnings.warn(
+                    "JAX has already initialized devices. Setting CUDA_VISIBLE_DEVICES "
+                    "may not take effect. For best results, call setup_gpu_environment() "
+                    "before any JAX operations.",
+                    UserWarning
+                )
+        except Exception:
+            # If we can't check, proceed anyway
+            pass
+        
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, gpu_ids))
     
     devices = get_gpu_devices()
