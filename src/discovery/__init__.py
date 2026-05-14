@@ -13,5 +13,6 @@ from .optimal import *
 from .solar import *
 from .pulsar import *
 from .deterministic import *
+from . import gpu_utils
 
 __version__ = "0.5"
