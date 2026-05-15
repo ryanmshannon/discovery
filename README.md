@@ -13,7 +13,7 @@ _Discovery_'s subpackages (such as `discovery.flow` and the packages under `disc
 
 ## Multi-GPU Support
 
-_Discovery_ now supports distributing computation across **multiple GPUs** for faster likelihood evaluations on large pulsar timing arrays. See [`docs/multi_gpu_usage.md`](docs/multi_gpu_usage.md) for detailed documentation.
+_Discovery_ now supports distributing computation across **multiple GPUs** for faster likelihood evaluations on large pulsar timing arrays. See [`docs/multi_gpu_usage.md`](docs/multi_gpu_usage.md) for basic multi-GPU usage and [`docs/model_sharding.md`](docs/model_sharding.md) for advanced model sharding techniques.
 
 Quick example:
 ```python
@@ -22,18 +22,23 @@ import discovery as ds
 # Create GlobalLikelihood (see examples below)
 gbl = ds.GlobalLikelihood(psls, globalgp)
 
-# Use all available GPUs
-logl_parallel = gbl.gpu_logL()
+# Use model sharding across GPUs with device placement
+logl_parallel = gbl.gpu_logL(use_pmap=True)
 
 # Evaluate (distributed across GPUs)
 result = logl_parallel(params)
 ```
 
 Features:
+- **Model sharding**: Distribute complex models across multiple GPUs
+- **Device placement**: Explicit control over GPU utilization
+- **Data parallelism**: Independent pulsar computations on different GPUs
 - Automatic GPU detection and load balancing
-- Data-parallel distribution of pulsar computations
 - Compatible with JIT compilation and other JAX transformations
 - Works alongside existing MPI parallelization
+
+For basic multi-GPU usage, see `docs/multi_gpu_usage.md`.
+For advanced sharding techniques, see `docs/model_sharding.md`.
 
 ## Examples
 
