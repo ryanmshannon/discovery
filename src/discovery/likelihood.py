@@ -551,17 +551,17 @@ class GlobalLikelihood:
             
             # Pad groups to have equal size (use dummy likelihood that returns 0)
             # Create dummy function factory to avoid closure issues
-            def make_dummy_logl():
-                def dummy_logl(params):
+            def make_dummy_logL():
+                def dummy_logL(params):
                     return 0.0
-                dummy_logl.params = []
-                return dummy_logl
+                dummy_logL.params = []
+                return dummy_logL
             
             max_group_size = max(len(g) for g in logl_groups)
             for group in logl_groups:
                 while len(group) < max_group_size:
                     # Add unique dummy likelihood instance
-                    group.append(make_dummy_logl())
+                    group.append(make_dummy_logL())
             
             def loglike(params):
                 # Place params on each device
