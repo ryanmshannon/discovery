@@ -550,33 +550,19 @@ class GlobalLikelihood:
                 logl_groups.append(logls[start_idx:end_idx])
             
             # Pad groups to have equal size (use dummy likelihood that returns 0)
+            # Create dummy function factory to avoid closure issues
+            def make_dummy_logl():
+                def dummy_logl(params):
+                    return 0.0
+                dummy_logl.params = []
+                return dummy_logl
+            
             max_group_size = max(len(g) for g in logl_groups)
             for group in logl_groups:
                 while len(group) < max_group_size:
-                    # Add dummy likelihood that returns 0
-                    def dummy_logl(params):
-                        return 0.0
-                    dummy_logl.params = []
-                    group.append(dummy_logl)
+                    # Add unique dummy likelihood instance
+                    group.append(make_dummy_logl())
             
-            # Create function that computes likelihood for one device's group
-            def compute_device_logl(params, device_idx):
-                group = logl_groups[device_idx]
-                return sum(logl(params) for logl in group)
-            
-            # Vectorize for pmap: create an array of device indices
-            device_indices = jnp.arange(num_devices)
-            
-            # Create pmapped version
-            # Note: We can't directly pmap over the groups since they contain Python functions
-            # Instead, we'll use a different strategy: pmap over a function that selects and evaluates
-            def pmap_func(device_idx):
-                # This will be called once per device in parallel
-                # device_idx is a scalar that identifies which device this is
-                return compute_device_logl
-            
-            # For pmap to work, we need to restructure this
-            # Let's use a simpler approach: manually place computation on devices
             def loglike(params):
                 # Place params on each device
                 param_list = [jax.device_put(params, device) for device in device_list]

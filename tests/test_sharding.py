@@ -82,8 +82,13 @@ class TestShardingUtilities:
         if num_gpus > 0:
             mesh = gpu_utils.get_device_mesh(min(2, num_gpus))
             # May return None if Mesh not available in JAX version
-            # Just check it doesn't crash
-            assert mesh is None or mesh is not None
+            # Check it doesn't crash and returns expected type
+            if mesh is not None:
+                # Verify it's a valid mesh object
+                assert hasattr(mesh, 'devices') or hasattr(mesh, 'shape')
+            else:
+                # None is acceptable for older JAX versions
+                assert mesh is None
     
     def test_pmap_reduce_sum(self):
         """Test pmap reduction with sum."""

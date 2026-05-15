@@ -28,8 +28,9 @@ def check_gpu_availability():
     print(f"Number of GPUs available: {num_gpus}")
     
     if num_gpus == 0:
-        print("Warning: No GPUs detected. This example requires GPUs.")
-        print("Continuing with CPU for demonstration...")
+        print("Warning: No GPUs detected.")
+        print("Examples will run on CPU with limited functionality.")
+        print("For full GPU features, ensure CUDA and JAX[cuda] are installed.")
         return False
     
     devices = ds.gpu_utils.get_gpu_devices()
