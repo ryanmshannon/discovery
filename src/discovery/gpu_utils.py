@@ -214,3 +214,197 @@ def pmap_wrapper(func, in_axes=0, out_axes=0, devices=None):
             devices = None  # Let JAX choose
     
     return jax.pmap(func, in_axes=in_axes, out_axes=out_axes, devices=devices)
+
+
+def create_sharding_spec(num_devices: int, data_axis: int = 0) -> Any:
+    """Create a JAX sharding specification for distributing data across devices.
+    
+    This function creates a PositionalSharding that specifies how to distribute
+    data across multiple devices. The sharding is applied along a specific axis
+    of the data.
+    
+    Args:
+        num_devices: Number of devices to shard across.
+        data_axis: Axis along which to shard the data (default: 0).
+    
+    Returns:
+        A JAX PositionalSharding object.
+        
+    Example:
+        >>> sharding = create_sharding_spec(4, data_axis=0)
+        >>> # Use with jax.device_put to place sharded data on devices
+    """
+    try:
+        from jax.sharding import PositionalSharding
+        devices = get_gpu_devices()
+        if len(devices) == 0:
+            devices = jax.devices('cpu')
+        
+        # Ensure we have enough devices
+        if len(devices) < num_devices:
+            warnings.warn(
+                f"Requested {num_devices} devices but only {len(devices)} available. "
+                f"Using {len(devices)} devices instead."
+            )
+            num_devices = len(devices)
+        
+        devices = devices[:num_devices]
+        sharding = PositionalSharding(devices)
+        
+        return sharding
+    except ImportError:
+        # Fall back to None if PositionalSharding is not available (older JAX)
+        warnings.warn(
+            "JAX PositionalSharding not available. Sharding functionality requires JAX >= 0.4.0"
+        )
+        return None
+
+
+def shard_array_to_devices(array: jnp.ndarray, num_devices: int, axis: int = 0) -> jnp.ndarray:
+    """Shard an array across multiple devices using JAX's device placement.
+    
+    This function distributes an array across multiple GPU devices, allowing
+    for true parallel computation. Unlike `shard_data` which just reshapes,
+    this function actually places data on different physical devices.
+    
+    Args:
+        array: Array to shard across devices.
+        num_devices: Number of devices to shard across.
+        axis: Axis along which to shard (default: 0).
+    
+    Returns:
+        Array with data distributed across devices.
+        
+    Example:
+        >>> data = jnp.arange(100).reshape(10, 10)
+        >>> sharded = shard_array_to_devices(data, 2)  # Distribute across 2 GPUs
+    """
+    try:
+        from jax.sharding import PositionalSharding
+        
+        if array.shape[axis] % num_devices != 0:
+            raise ValueError(
+                f"Array dimension {array.shape[axis]} along axis {axis} "
+                f"is not evenly divisible by {num_devices} devices."
+            )
+        
+        devices = get_gpu_devices()
+        if len(devices) == 0:
+            warnings.warn("No GPUs available. Array will remain on CPU.")
+            return array
+        
+        devices = devices[:min(num_devices, len(devices))]
+        sharding = PositionalSharding(devices)
+        
+        # For simple 1D device sharding, we can use direct placement
+        # More complex sharding patterns would require mesh-based sharding
+        # For now, use simple device_put approach
+        return jax.device_put(array, sharding)
+        
+    except (ImportError, AttributeError):
+        # Fallback for older JAX versions
+        warnings.warn("Advanced sharding not available. Using simple device placement.")
+        return array
+
+
+def replicate_across_devices(data: Any, devices: Optional[List[Any]] = None) -> Any:
+    """Replicate data across all specified devices.
+    
+    This is useful for parameters or constants that need to be available
+    on all devices for parallel computation.
+    
+    Args:
+        data: Data to replicate (can be arrays, nested structures, etc.).
+        devices: List of devices to replicate to. If None, uses all GPUs.
+    
+    Returns:
+        Data replicated across devices.
+        
+    Example:
+        >>> params = {'log10_A': -15.0, 'gamma': 4.33}
+        >>> replicated = replicate_across_devices(params)
+    """
+    if devices is None:
+        devices = get_gpu_devices()
+        if len(devices) == 0:
+            devices = jax.devices('cpu')
+    
+    # For pmap, we need to stack the data along the first axis
+    # and then JAX will automatically place each slice on a device
+    return jax.tree_util.tree_map(
+        lambda x: jnp.stack([x] * len(devices)) if isinstance(x, jnp.ndarray) else x,
+        data
+    )
+
+
+def pmap_reduce_sum(func, devices=None):
+    """Create a pmapped function that sums results across devices.
+    
+    This is a common pattern for likelihood computations where each device
+    computes a partial likelihood and results need to be summed.
+    
+    Args:
+        func: Function to parallelize. Should take parameters and return a scalar.
+        devices: Optional list of devices to use.
+    
+    Returns:
+        A function that distributes computation and sums results.
+        
+    Example:
+        >>> def compute_partial(params, data):
+        ...     return jnp.sum(data * params['scale'])
+        >>> parallel_func = pmap_reduce_sum(compute_partial)
+    """
+    if devices is None:
+        devices = get_gpu_devices()
+        if len(devices) == 0:
+            warnings.warn("No GPUs available, using CPU for pmap.")
+            devices = jax.devices('cpu')
+    
+    # Create pmapped version
+    pmapped = jax.pmap(func, devices=devices)
+    
+    # Wrapper that sums results
+    def wrapper(*args, **kwargs):
+        results = pmapped(*args, **kwargs)
+        return jnp.sum(results)
+    
+    return wrapper
+
+
+def get_device_mesh(num_devices: Optional[int] = None) -> Any:
+    """Create a device mesh for advanced sharding patterns.
+    
+    A device mesh is useful for multi-dimensional sharding patterns,
+    e.g., sharding both data and model parameters.
+    
+    Args:
+        num_devices: Number of devices to include in mesh. If None, uses all GPUs.
+    
+    Returns:
+        A JAX Mesh object (or None if not available).
+        
+    Example:
+        >>> mesh = get_device_mesh(4)
+        >>> # Use with NamedSharding for complex sharding patterns
+    """
+    try:
+        from jax.sharding import Mesh
+        from jax.experimental import mesh_utils
+        
+        devices = get_gpu_devices()
+        if len(devices) == 0:
+            devices = jax.devices('cpu')
+        
+        if num_devices is not None:
+            devices = devices[:min(num_devices, len(devices))]
+        
+        # Create a 1D mesh (can be extended to 2D for more complex patterns)
+        device_array = mesh_utils.create_device_mesh((len(devices),), devices)
+        mesh = Mesh(device_array, ('data',))
+        
+        return mesh
+        
+    except ImportError:
+        warnings.warn("JAX Mesh not available. Requires JAX >= 0.4.0")
+        return None
