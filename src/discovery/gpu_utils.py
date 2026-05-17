@@ -107,9 +107,9 @@ def shard_data(data: jnp.ndarray, num_devices: int) -> jnp.ndarray:
     """
     if data.shape[0] % num_devices != 0:
         raise ValueError(
-            f"Cannot evenly shard data with shape {data.shape} "
-            f"across {num_devices} devices. First dimension ({data.shape[0]}) "
-            f"must be divisible by number of devices ({num_devices})."
+            f"Data with shape {data.shape} is not evenly divisible "
+            f"across {num_devices} devices (first dimension {data.shape[0]} "
+            f"must be divisible by {num_devices})."
         )
     
     batch_per_device = data.shape[0] // num_devices
