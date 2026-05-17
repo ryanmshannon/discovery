@@ -1,4 +1,5 @@
 import functools
+import warnings
 # from dataclasses import dataclass
 
 import numpy as np
@@ -544,19 +545,7 @@ class GlobalLikelihood:
             # Build device-local closures so captured arrays (noise matrices,
             # Cholesky factors, etc.) are placed on the target device at
             # construction time, ensuring computations actually execute there.
-            import warnings as _gpu_warnings
-
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
-
-            has_delays = any(callable(psl.y) for psl in psls_list)
-            if has_delays:
-                _gpu_warnings.warn(
-                    "Some pulsars have delay functions. Those pulsars' likelihood "
-                    "closures cannot be fully placed on a target device at "
-                    "construction time; only evaluation-time parameters will be "
-                    "moved. Use use_pmap=False for a sequential fallback.",
-                    UserWarning,
-                )
 
             def make_dummy_logL():
                 def dummy_logL(params):
@@ -578,6 +567,15 @@ class GlobalLikelihood:
                             # Delay functions: psl.logL calls make_kernelproduct
                             # at evaluation time, so device placement is
                             # determined by the evaluation-time context.
+                            warnings.warn(
+                                f"Pulsar '{getattr(psl, 'name', psl)}' has a delay "
+                                "function. Its likelihood closure cannot be fully placed "
+                                "on the target device at construction time; only "
+                                "evaluation-time parameters will be moved. "
+                                "Use use_pmap=False for a sequential fallback.",
+                                UserWarning,
+                                stacklevel=2,
+                            )
                             group.append(psl.logL)
                         else:
                             # Create a fresh closure with captured arrays on
@@ -635,7 +633,6 @@ class GlobalLikelihood:
             
             # Check if we can evenly distribute
             if num_pulsars % num_devices != 0:
-                import warnings
                 warnings.warn(
                     f"Number of pulsars ({num_pulsars}) is not evenly divisible by "
                     f"number of devices ({num_devices}). Performance may be suboptimal."
