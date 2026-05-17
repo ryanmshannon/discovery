@@ -1,4 +1,5 @@
 import functools
+import warnings
 # from dataclasses import dataclass
 
 import numpy as np
@@ -505,7 +506,10 @@ class GlobalLikelihood:
         
         if self.globalgp is None:
             # Simple case: no global GP, just sum independent pulsar likelihoods
-            logls = [psl.logL for psl in self.psls]
+            # Materialize self.psls so it can be iterated again when building
+            # device-local closures in the use_pmap=True path below.
+            psls_list = list(self.psls)
+            logls = [psl.logL for psl in psls_list]
             num_pulsars = len(logls)
             
             if num_pulsars == 0:
@@ -538,46 +542,65 @@ class GlobalLikelihood:
                 loglike.params = sorted(set.union(*[set(logl.params) for logl in logls]))
                 return loglike
             
-            # Use pmap for true parallel execution
-            # Ensure even distribution by padding if necessary
+            # Build device-local closures so captured arrays (noise matrices,
+            # Cholesky factors, etc.) are placed on the target device at
+            # construction time, ensuring computations actually execute there.
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
-            
-            # Group logls by device
-            logl_groups = []
-            for i in range(num_devices):
-                start_idx = i * pulsars_per_device
-                end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
-                logl_groups.append(logls[start_idx:end_idx])
-            
-            # Pad groups to have equal size (use dummy likelihood that returns 0)
-            # Create dummy function factory to avoid closure issues
+
             def make_dummy_logL():
                 def dummy_logL(params):
                     return 0.0
                 dummy_logL.params = []
                 return dummy_logL
-            
+
+            # Build groups with device-local closures; keep a pre-padding list
+            # so that .params can be collected before dummies are added.
+            logl_groups = []
+            pre_padding_logls = []
+            for i, device in enumerate(device_list):
+                start_idx = i * pulsars_per_device
+                end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
+                group = []
+                with jax.default_device(device):
+                    for psl in psls_list[start_idx:end_idx]:
+                        if callable(psl.y):
+                            # Delay functions: psl.logL calls make_kernelproduct
+                            # at evaluation time, so device placement is
+                            # determined by the evaluation-time context.
+                            warnings.warn(
+                                f"Pulsar '{getattr(psl, 'name', psl)}' has a delay "
+                                "function. Its likelihood closure cannot be fully placed "
+                                "on the target device at construction time; only "
+                                "evaluation-time parameters will be moved. "
+                                "Use use_pmap=False for a sequential fallback.",
+                                UserWarning,
+                                stacklevel=2,
+                            )
+                            group.append(psl.logL)
+                        else:
+                            # Create a fresh closure with captured arrays on
+                            # this device so the computation runs there.
+                            group.append(psl.N.make_kernelproduct(psl.y))
+                pre_padding_logls.extend(group)
+                logl_groups.append(group)
+
             max_group_size = max(len(g) for g in logl_groups)
             for group in logl_groups:
                 while len(group) < max_group_size:
-                    # Add unique dummy likelihood instance
                     group.append(make_dummy_logL())
-            
+
             def loglike(params):
-                # Place params on each device
-                param_list = [jax.device_put(params, device) for device in device_list]
-                
-                # Compute on each device
                 results = []
-                for i, (param_copy, device) in enumerate(zip(param_list, device_list)):
+                for logl_group, device in zip(logl_groups, device_list):
+                    params_on_device = jax.device_put(params, device)
                     with jax.default_device(device):
-                        group_sum = sum(logl(param_copy) for logl in logl_groups[i])
-                        results.append(group_sum)
-                
-                # Sum results
+                        group_sum = sum(logl(params_on_device) for logl in logl_group)
+                    # Move the partial sum to the primary device before
+                    # aggregating to avoid cross-device operation errors.
+                    results.append(jax.device_put(group_sum, device_list[0]))
                 return sum(results)
-            
-            loglike.params = sorted(set.union(*[set(logl.params) for logl in logls]))
+
+            loglike.params = sorted(set.union(*[set(logl.params) for logl in pre_padding_logls]))
             
         else:
             # Complex case: with global GP
@@ -596,7 +619,10 @@ class GlobalLikelihood:
                     raise AttributeError("globalgp must carry 'Fs' or 'F'.")
                 Fs = F if isinstance(F, (list, tuple)) else [F] * len(self.psls)
 
-            kterms = [psl.N.make_kernelterms(psl.y, Fmat) for psl, Fmat in zip(self.psls, Fs)]
+            # Materialize self.psls paired with Fs to allow a second pass when
+            # building device-local closures in the use_pmap=True path below.
+            psls_and_Fs = list(zip(self.psls, Fs))
+            kterms = [psl.N.make_kernelterms(psl.y, Fmat) for psl, Fmat in psls_and_Fs]
             num_pulsars = len(kterms)
             
             if num_pulsars < num_devices:
@@ -607,7 +633,6 @@ class GlobalLikelihood:
             
             # Check if we can evenly distribute
             if num_pulsars % num_devices != 0:
-                import warnings
                 warnings.warn(
                     f"Number of pulsars ({num_pulsars}) is not evenly divisible by "
                     f"number of devices ({num_devices}). Performance may be suboptimal."
@@ -676,27 +701,39 @@ class GlobalLikelihood:
                 loglike.devices = device_list
                 return loglike
             
-            # Use parallel device placement for kernel term computation
-            # Group kterms by device
+            # Build device-local kernel term groups so captured arrays
+            # (noise matrices, Cholesky factors, etc.) are placed on the
+            # target device at construction time, ensuring computations
+            # actually execute there.
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
             kterm_groups = []
-            for i in range(num_devices):
+            for i, device in enumerate(device_list):
                 start_idx = i * pulsars_per_device
                 end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
-                kterm_groups.append(kterms[start_idx:end_idx])
-            
+                with jax.default_device(device):
+                    group = [
+                        psl.N.make_kernelterms(psl.y, Fmat)
+                        for psl, Fmat in psls_and_Fs[start_idx:end_idx]
+                    ]
+                kterm_groups.append(group)
+
             def loglike(params):
-                # Compute kernel terms with device placement
+                # Compute kernel terms on each device, then move results to the
+                # primary device for aggregation to avoid cross-device errors.
                 all_terms = []
-                for device_idx, (kterm_group, device) in enumerate(zip(kterm_groups, device_list)):
-                    # Place params on device
+                for kterm_group, device in zip(kterm_groups, device_list):
                     params_on_device = jax.device_put(params, device)
                     with jax.default_device(device):
                         group_terms = [kterm(params_on_device) for kterm in kterm_group]
-                        all_terms.extend(group_terms)
-                
+                    for t0, t1, t2 in group_terms:
+                        all_terms.append((
+                            jax.device_put(t0, device_list[0]),
+                            jax.device_put(t1, device_list[0]),
+                            jax.device_put(t2, device_list[0]),
+                        ))
+
                 terms = all_terms
-                
+
                 p0 = sum([term[0] for term in terms])
                 FtNmy = matrix.jnp.concatenate([term[1] for term in terms])
 
