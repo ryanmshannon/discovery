@@ -10,6 +10,12 @@ In VSCode, Code Coverage is recorded in config.xml. Delete this file to reset re
 
 from __future__ import annotations
 
+# Force JAX to expose 4 CPU devices so that multi-device tests (which simulate
+# multiple GPUs using CPU devices) can run without real GPU hardware.  This
+# must be set before any JAX import so it takes effect during initialisation.
+import os
+os.environ.setdefault('XLA_FLAGS', '--xla_force_host_platform_device_count=4')
+
 from typing import List
 
 import pytest
