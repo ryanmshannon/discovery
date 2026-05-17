@@ -583,7 +583,10 @@ class GlobalLikelihood:
                         else:
                             # Create a fresh closure with captured arrays on
                             # this device so the computation runs there.
-                            group.append(psl.N.make_kernelproduct(psl.y))
+                            # Explicitly move psl.y to the target device:
+                            # jax.default_device only affects *new* array
+                            # allocation, not arrays already resident on GPU:0.
+                            group.append(psl.N.make_kernelproduct(jax.device_put(psl.y, device)))
                 pre_padding_logls.extend(group)
                 logl_groups.append(group)
 
@@ -717,7 +720,15 @@ class GlobalLikelihood:
                 end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
                 with jax.default_device(device):
                     group = [
-                        psl.N.make_kernelterms(psl.y, Fmat)
+                        # Explicitly move input arrays to the target device
+                        # before calling make_kernelterms. jax.default_device
+                        # only affects *new* array allocation, so arrays that
+                        # are already resident on GPU:0 (psl.y, Fmat) would
+                        # otherwise keep the computation there.
+                        psl.N.make_kernelterms(
+                            jax.device_put(psl.y, device),
+                            jax.device_put(Fmat, device),
+                        )
                         for psl, Fmat in psls_and_Fs[start_idx:end_idx]
                     ]
                 kterm_groups.append(group)
