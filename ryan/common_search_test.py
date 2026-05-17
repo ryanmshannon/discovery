@@ -119,7 +119,7 @@ logl_jit=jax.jit(logl_parallel)
 
 
 
-print("Model parameters:\n", model.logL.params)
+print("Model parameters:\n", logl_parallel.params)
 
 # Save results as a DataFrame
 save_name = "{0}/results/{1}_{2}_{3}".format(outdir, model_name, str(max_cadence_days), str(chain_number))
