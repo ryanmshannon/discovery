@@ -509,8 +509,7 @@ class GlobalLikelihood:
             # Materialize self.psls so it can be iterated again when building
             # device-local closures in the use_pmap=True path below.
             psls_list = list(self.psls)
-            logls = [psl.logL for psl in psls_list]
-            num_pulsars = len(logls)
+            num_pulsars = len(psls_list)
             
             if num_pulsars == 0:
                 raise ValueError("No pulsars in GlobalLikelihood. Cannot create gpu_logL.")
@@ -522,7 +521,11 @@ class GlobalLikelihood:
                 )
             
             if not use_pmap:
-                # Fallback to sequential grouping (original behavior)
+                # Fallback to sequential grouping (original behavior).
+                # Access psl.logL here (inside use_pmap=False only) so that the
+                # cached_property's jnparray allocations do not pre-populate GPU:0
+                # when use_pmap=True.
+                logls = [psl.logL for psl in psls_list]
                 pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
                 
                 # Group logls by device
@@ -622,8 +625,7 @@ class GlobalLikelihood:
             # Materialize self.psls paired with Fs to allow a second pass when
             # building device-local closures in the use_pmap=True path below.
             psls_and_Fs = list(zip(self.psls, Fs))
-            kterms = [psl.N.make_kernelterms(psl.y, Fmat) for psl, Fmat in psls_and_Fs]
-            num_pulsars = len(kterms)
+            num_pulsars = len(psls_and_Fs)
             
             if num_pulsars < num_devices:
                 raise ValueError(
@@ -641,7 +643,10 @@ class GlobalLikelihood:
             kmeans = getattr(self.globalgp, 'means', None)
             
             if not use_pmap:
-                # Fallback: sequential evaluation (original behavior)
+                # Fallback: sequential evaluation (original behavior).
+                # Build kterms here (inside use_pmap=False only) so their
+                # jnparray allocations do not pre-populate GPU:0 when use_pmap=True.
+                kterms = [psl.N.make_kernelterms(psl.y, Fmat) for psl, Fmat in psls_and_Fs]
                 pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
                 kterm_groups = []
                 Fs_groups = []
@@ -769,7 +774,8 @@ class GlobalLikelihood:
 
                 return logp
 
-            params_kterms = list(set.union(*[set(kterm.params) for kterm in kterms]))
+            all_kterms_flat = [kt for g in kterm_groups for kt in g]
+            params_kterms = list(set.union(*[set(kterm.params) for kterm in all_kterms_flat]) if all_kterms_flat else set())
             params_kmeans = kmeans.params if kmeans is not None else []
             loglike.params = sorted(params_kterms + params_kmeans + P_var_inv.params)
         
