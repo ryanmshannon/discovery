@@ -19,7 +19,19 @@ from discovery import gpu_utils, matrix
 # ---------------------------------------------------------------------------
 
 def _make_test_psl(seed=0, n_toa=50, n_fourier=10):
-    """Create a minimal PulsarLikelihood with a variable-P WoodburyKernel."""
+    """Create a minimal PulsarLikelihood with a variable-P WoodburyKernel.
+
+    The prior amplitude parameter is named ``log_amp_{seed}`` so that
+    multiple pulsars created with different seeds each have a unique
+    parameter name.  When constructing parameter dictionaries for tests,
+    use ``{f'log_amp_{i}': value}`` for pulsars created with ``seed=i``.
+
+    Args:
+        seed: Random seed used to generate residuals and the Fourier matrix.
+              Also determines the prior parameter name (``log_amp_{seed}``).
+        n_toa: Number of simulated timing residuals (observations).
+        n_fourier: Number of Fourier basis functions for the red-noise GP.
+    """
     rng = np.random.default_rng(seed)
     y = rng.standard_normal(n_toa)
     noise = matrix.NoiseMatrix1D_novar(np.ones(n_toa))
@@ -37,7 +49,16 @@ def _make_test_psl(seed=0, n_toa=50, n_fourier=10):
 
 
 def _make_test_globalgp(n_psr, n_toa=50, n_gp=5):
-    """Create a minimal GlobalVariableGP covering *n_psr* pulsars."""
+    """Create a minimal GlobalVariableGP covering *n_psr* pulsars.
+
+    Uses a fixed random seed (99) for reproducibility.  The global prior
+    has a single scalar amplitude parameter named ``gp_log_amp``.
+
+    Args:
+        n_psr: Number of pulsars (one Fourier matrix is created per pulsar).
+        n_toa: Number of timing residuals per pulsar (default 50).
+        n_gp: Number of Fourier components in the global GP (default 5).
+    """
     rng = np.random.default_rng(99)
     Fs = [rng.standard_normal((n_toa, n_gp)) for _ in range(n_psr)]
 
@@ -50,15 +71,50 @@ def _make_test_globalgp(n_psr, n_toa=50, n_gp=5):
 
 
 def _multi_cpu_devices(n=2):
-    """Return *n* CPU devices; skip the test if fewer are available."""
+    """Return *n* CPU devices; skip the calling test if fewer are available.
+
+    During the normal test suite ``conftest.py`` sets
+    ``XLA_FLAGS=--xla_force_host_platform_device_count=4`` before JAX is
+    imported, so 4 CPU devices are always available.  This helper will
+    skip a test only when running outside the test suite without that flag.
+    """
     devices = jax.devices('cpu')
     if len(devices) < n:
         pytest.skip(
             f"Need at least {n} CPU devices.  "
-            f"Set XLA_FLAGS=--xla_force_host_platform_device_count={n} "
-            "before importing JAX."
+            "conftest.py sets XLA_FLAGS to provide 4 simulated CPU devices; "
+            "ensure JAX is imported after that environment variable is set."
         )
     return devices[:n]
+
+
+def _extract_closure_groups(fn):
+    """Extract ``(groups, device_list)`` from a ``gpu_logL`` closure.
+
+    The ``loglike`` function returned by ``gpu_logL`` closes over a list of
+    :class:`jax.Device` objects and a list-of-lists of callable kernel
+    closures.  This helper locates those two objects by inspecting the
+    Python closure cells of *fn* and returns them as a 2-tuple.
+
+    Returns:
+        ``(groups, device_list)`` where *groups* is a list of lists of
+        callable closures and *device_list* is a list of :class:`jax.Device`.
+        Either element may be ``None`` if it could not be found.
+    """
+    groups = None
+    device_list = None
+    for cell in fn.__closure__:
+        try:
+            v = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(v, list) and v and isinstance(v[0], jax.Device):
+            device_list = v
+        elif (isinstance(v, list) and v
+                and isinstance(v[0], list) and v[0]
+                and callable(v[0][0])):
+            groups = v
+    return groups, device_list
 
 
 # ---------------------------------------------------------------------------
@@ -132,20 +188,7 @@ class TestMultiDeviceNoGlobalGP:
         gbl, _, devices = setup
         fn = gbl.gpu_logL(devices=devices, use_pmap=True)
 
-        # Extract logl_groups and device_list from the closure.
-        logl_groups = None
-        device_list = None
-        for cell in fn.__closure__:
-            try:
-                v = cell.cell_contents
-            except ValueError:
-                continue
-            if isinstance(v, list) and v and isinstance(v[0], jax.Device):
-                device_list = v
-            elif (isinstance(v, list) and v
-                    and isinstance(v[0], list) and v[0]
-                    and callable(v[0][0])):
-                logl_groups = v
+        logl_groups, device_list = _extract_closure_groups(fn)
 
         assert logl_groups is not None, "Could not find logl_groups in closure"
         assert device_list is not None, "Could not find device_list in closure"
@@ -248,19 +291,7 @@ class TestMultiDeviceWithGlobalGP:
         gbl, _, devices = setup
         fn = gbl.gpu_logL(devices=devices, use_pmap=True)
 
-        kterm_groups = None
-        device_list = None
-        for cell in fn.__closure__:
-            try:
-                v = cell.cell_contents
-            except ValueError:
-                continue
-            if isinstance(v, list) and v and isinstance(v[0], jax.Device):
-                device_list = v
-            elif (isinstance(v, list) and v
-                    and isinstance(v[0], list) and v[0]
-                    and callable(v[0][0])):
-                kterm_groups = v
+        kterm_groups, device_list = _extract_closure_groups(fn)
 
         assert kterm_groups is not None, "Could not find kterm_groups in closure"
         assert device_list is not None, "Could not find device_list in closure"
