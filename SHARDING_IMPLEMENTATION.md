@@ -4,7 +4,7 @@
 
 This implementation adds comprehensive model sharding support to Discovery, enabling complex pulsar timing array models to be efficiently distributed across multiple GPUs.
 
-## What Was Implemented
+## What Was Implemented / Fixed
 
 ### 1. Enhanced GPU Utilities (`src/discovery/gpu_utils.py`)
 
@@ -17,13 +17,29 @@ Added advanced sharding utilities:
 
 ### 2. GlobalLikelihood Sharding (`src/discovery/likelihood.py`)
 
-Enhanced `GlobalLikelihood.gpu_logL()` method:
-- **With `use_pmap=True` (default)**: Uses device placement for parallel computation
-  - Without globalgp: Distributes pulsars across GPUs with explicit device placement
-  - With globalgp: Parallelizes kernel term computation across devices
-- **With `use_pmap=False`**: Falls back to sequential grouping (for debugging)
-- Handles uneven pulsar distribution with padding
-- Provides clear error messages for misconfiguration
+**Bug fix in `GlobalLikelihood.gpu_logL()` (`use_pmap=True` path):**
+
+The original implementation called `make_kernelterms` / `make_kernelproduct` outside any
+device context.  Those calls internally allocate JAX arrays (via `jnparray`).  Regardless
+of later `jax.device_put` / `jax.default_device` hints, a function whose **closed-over**
+arrays are on GPU:0 will always execute on GPU:0.
+
+The fix creates the kernel-term and kernel-product closures **inside**
+`jax.default_device(device)` for each group, so every captured array is placed on the
+intended device at construction time.
+
+Detailed behaviour of `gpu_logL(use_pmap=True)`:
+- **Without globalgp**: For each device group, calls `psl.N.make_kernelproduct(psl.y)`
+  inside `jax.default_device(device)`, creating a closure whose pre-computed arrays live
+  on that device.  Pulsars with delay functions (`callable(psl.y)`) fall back to
+  `psl.logL` (which creates its kernel-product closure at each evaluation) with a
+  `UserWarning`.  Partial results are explicitly moved back to `device_list[0]` before
+  summation.
+- **With globalgp**: For each device group, calls `psl.N.make_kernelterms(psl.y, Fmat)`
+  inside `jax.default_device(device)`.  Each term triple `(t0, t1, t2)` returned at
+  evaluation time is moved to `device_list[0]` with `jax.device_put` before aggregation,
+  avoiding cross-device operation errors.
+- **With `use_pmap=False`**: Sequential debug fallback — unchanged.
 
 ### 3. ArrayLikelihood GPU Support (`src/discovery/likelihood.py`)
 
@@ -243,13 +259,20 @@ To validate performance improvements:
 
 ## Known Limitations
 
-1. **Sequential group evaluation**: Current implementation evaluates device groups sequentially within the likelihood function (though each group executes on its assigned device). True parallel execution would require deeper JAX integration.
+1. **Sequential Python dispatch**: Device groups are dispatched sequentially from Python.
+   JAX's asynchronous execution means GPU kernels can overlap in practice, but true
+   synchronous parallelism would require `jax.pmap`.
 
-2. **Communication overhead**: For very small problems, overhead may exceed benefits.
+2. **Delay-function pulsars**: Pulsars whose timing model includes delay functions
+   (`callable(psl.y)`) use `psl.logL` as a fallback.  That wrapper calls
+   `make_kernelproduct` at every evaluation so captured noise arrays are on the device
+   active at call time, not at construction time.  A `UserWarning` is emitted.
 
-3. **Memory requirements**: Each device needs sufficient memory for its share of data.
+3. **Communication overhead**: For very small problems, overhead may exceed benefits.
 
-4. **Even distribution**: Best performance when pulsars divide evenly across GPUs.
+4. **Memory requirements**: Each device needs sufficient memory for its share of data.
+
+5. **Even distribution**: Best performance when pulsars divide evenly across GPUs.
 
 ## Support and Troubleshooting
 
