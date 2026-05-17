@@ -296,9 +296,12 @@ def shard_array_to_devices(array: jnp.ndarray, num_devices: int, axis: int = 0) 
         devices = devices[:min(num_devices, len(devices))]
         sharding = PositionalSharding(devices)
         
-        # For simple 1D device sharding, we can use direct placement
-        # More complex sharding patterns would require mesh-based sharding
-        # For now, use simple device_put approach
+        # Reshape sharding to match array rank: place num_devices along the
+        # target axis and 1s on all other axes so ranks match.
+        sharding_shape = [1] * array.ndim
+        sharding_shape[axis] = num_devices
+        sharding = sharding.reshape(sharding_shape)
+        
         return jax.device_put(array, sharding)
         
     except (ImportError, AttributeError):
