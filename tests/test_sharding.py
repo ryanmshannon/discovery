@@ -155,7 +155,7 @@ class TestGlobalLikelihoodSharding:
         # Test device_put
         test_data = jnp.array([1.0, 2.0, 3.0])
         placed_data = jax.device_put(test_data, devices[0])
-        assert placed_data.device() == devices[0]
+        assert placed_data.device == devices[0]
 
 
 class TestArrayLikelihoodSharding:
