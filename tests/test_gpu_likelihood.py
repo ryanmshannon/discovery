@@ -93,8 +93,8 @@ def _make_test_psl_with_prealloc_freq(seed=0, n_toa=50, n_fourier=10):
 def _all_closure_arrays(fn, _visited=None):
     """Recursively collect all jax.Array objects found in *fn*'s closure tree.
 
-    Returns a list of ``(array, depth)`` tuples where *depth* is the nesting
-    level at which the array was found (0 = direct closure of *fn*).
+    Returns a flat list of :class:`jax.Array` objects found at any depth in
+    the closure hierarchy of *fn*.
     """
     if _visited is None:
         _visited = set()

@@ -415,7 +415,15 @@ def get_device_mesh(num_devices: Optional[int] = None) -> Any:
 
 
 def _put_value_on_device(v: Any, device: Any, visited: set) -> Any:
-    """Transfer a single closure value to device, recursing into callables and containers."""
+    """Transfer a single closure value to device, recursing into callables and containers.
+
+    Args:
+        v: The value extracted from a closure cell.
+        device: Target JAX device.
+        visited: Set of function ``id``\\s already processed, used by the
+            outer :func:`put_closure_arrays_on_device` call to prevent
+            infinite recursion when closures contain self-referential objects.
+    """
     if isinstance(v, jax.Array):
         return jax.device_put(v, device)
     elif callable(v) and hasattr(v, '__closure__') and v.__closure__:
