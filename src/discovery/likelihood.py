@@ -503,6 +503,7 @@ class GlobalLikelihood:
             device_list = devices
             
         num_devices = len(device_list)
+        print("number of devices:", num_devices)
         
         if self.globalgp is None:
             # Simple case: no global GP, just sum independent pulsar likelihoods
@@ -549,6 +550,10 @@ class GlobalLikelihood:
             # Cholesky factors, etc.) are placed on the target device at
             # construction time, ensuring computations actually execute there.
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
+
+            print("pulsars per device", pulsars_per_device)
+
+            print("device list", device_list)
 
             def make_dummy_logL():
                 def dummy_logL(params):
@@ -601,6 +606,7 @@ class GlobalLikelihood:
                     params_on_device = jax.device_put(params, device)
                     with jax.default_device(device):
                         group_sum = sum(logl(params_on_device) for logl in logl_group)
+                        print(device, group_sum)
                     # Move the partial sum to the primary device before
                     # aggregating to avoid cross-device operation errors.
                     results.append(jax.device_put(group_sum, device_list[0]))
