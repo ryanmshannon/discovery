@@ -48,6 +48,89 @@ def _make_test_psl(seed=0, n_toa=50, n_fourier=10):
     return ds.PulsarLikelihood([y, kern])
 
 
+def _make_test_psl_with_prealloc_freq(seed=0, n_toa=50, n_fourier=10):
+    """Create a PulsarLikelihood whose prior captures a pre-allocated JAX array.
+
+    This mimics the behaviour of :func:`~discovery.signals.makegp_fourier`,
+    which pre-allocates frequency arrays as JAX arrays at model-setup time::
+
+        f, df = matrix.jnparray(f), matrix.jnparray(df)
+        def priorfunc(params):
+            return prior(f, df, ...)
+
+    Those arrays land on the default device (GPU:0) when the model is built.
+    ``gpu_logL`` must transfer them to the assigned device for each pulsar so
+    that evaluation does not trigger cross-device operations.
+
+    Args:
+        seed: Random seed; also determines the prior parameter name
+              (``log_amp_{seed}``).
+        n_toa: Number of simulated timing residuals.
+        n_fourier: Number of Fourier basis functions.
+    """
+    rng = np.random.default_rng(seed)
+    y = rng.standard_normal(n_toa)
+    noise = matrix.NoiseMatrix1D_novar(np.ones(n_toa))
+    F = rng.standard_normal((n_toa, n_fourier))
+
+    param_name = f'log_amp_{seed}'
+
+    # Pre-allocate a frequency array on the *current* default device,
+    # exactly as makegp_fourier does with jnparray(f).
+    freqs = jnp.array(np.linspace(1.0 / 100, n_fourier / 100, n_fourier))
+
+    def getN(params):
+        # Uses the pre-allocated `freqs` from the outer scope —
+        # this is the array that must be transferred to each device.
+        return jnp.exp(params[param_name]) * freqs ** (-4.0 / 3.0)
+    getN.params = [param_name]
+
+    prior = matrix.NoiseMatrix1D_var(getN)
+    kern = matrix.WoodburyKernel(noise, F, prior)
+    return ds.PulsarLikelihood([y, kern])
+
+
+def _all_closure_arrays(fn, _visited=None):
+    """Recursively collect all jax.Array objects found in *fn*'s closure tree.
+
+    Returns a flat list of :class:`jax.Array` objects found at any depth in
+    the closure hierarchy of *fn*.
+    """
+    if _visited is None:
+        _visited = set()
+    fn_id = id(fn)
+    if fn_id in _visited:
+        return []
+    _visited.add(fn_id)
+
+    results = []
+    if not (hasattr(fn, '__closure__') and fn.__closure__):
+        return results
+
+    for cell in fn.__closure__:
+        try:
+            v = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(v, jax.Array):
+            results.append(v)
+        elif callable(v) and hasattr(v, '__closure__') and v.__closure__:
+            results.extend(_all_closure_arrays(v, _visited))
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                if isinstance(item, jax.Array):
+                    results.append(item)
+                elif callable(item) and hasattr(item, '__closure__') and item.__closure__:
+                    results.extend(_all_closure_arrays(item, _visited))
+        elif isinstance(v, dict):
+            for val in v.values():
+                if isinstance(val, jax.Array):
+                    results.append(val)
+                elif callable(val) and hasattr(val, '__closure__') and val.__closure__:
+                    results.extend(_all_closure_arrays(val, _visited))
+    return results
+
+
 def _make_test_globalgp(n_psr, n_toa=50, n_gp=5):
     """Create a minimal GlobalVariableGP covering *n_psr* pulsars.
 
@@ -370,6 +453,124 @@ class TestMultiDeviceWithGlobalGP:
         multi = float(fn(params))
         assert np.isclose(single, multi, rtol=1e-5), (
             f"single={single}, multi={multi}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests for pre-allocated JAX arrays in prior functions (the core bug)
+# ---------------------------------------------------------------------------
+
+class TestPreallocatedArrayTransfer:
+    """Verify that pre-allocated JAX arrays in prior closures are transferred.
+
+    Signal functions such as ``makegp_fourier`` call ``jnparray`` on frequency
+    arrays at model-setup time, placing them on the default device (GPU:0).
+    Those arrays end up nested inside the ``getN`` / ``priorfunc`` callables
+    that are captured by the per-device kernel closures built by ``gpu_logL``.
+
+    ``gpu_logL`` must call ``put_closure_arrays_on_device`` on every kernel
+    closure after construction so that these deeply-nested arrays are also
+    moved to the assigned device, preventing cross-device operations at
+    evaluation time.
+    """
+
+    @pytest.fixture
+    def setup(self):
+        devices = _multi_cpu_devices(2)
+        n_psr = 4
+        # Use the helper whose prior captures a pre-allocated JAX frequency array.
+        psls = [_make_test_psl_with_prealloc_freq(i) for i in range(n_psr)]
+        gbl = ds.GlobalLikelihood(psls)
+        params = {f'log_amp_{i}': jnp.array(float(i) * 0.2 - 0.3) for i in range(n_psr)}
+        return gbl, params, devices
+
+    def test_pmap_result_matches_single_device(self, setup):
+        """Multi-device result matches single-device even with pre-allocated freq arrays."""
+        gbl, params, devices = setup
+        single = float(gbl.logL(params))
+        fn = gbl.gpu_logL(devices=devices, use_pmap=True)
+        multi = float(fn(params))
+        assert np.isclose(single, multi, rtol=1e-5), (
+            f"single={single}, multi={multi}"
+        )
+
+    def test_nested_closure_arrays_on_correct_device(self, setup):
+        """All JAX arrays in nested closures (including pre-allocated freq arrays) are
+        on the device assigned to their group after gpu_logL."""
+        gbl, _, devices = setup
+        fn = gbl.gpu_logL(devices=devices, use_pmap=True)
+
+        kterm_groups, device_list = _extract_closure_groups(fn)
+
+        assert kterm_groups is not None, "Could not find kterm_groups in closure"
+        assert device_list is not None, "Could not find device_list in closure"
+
+        for group, expected_device in zip(kterm_groups, device_list):
+            for kterm_fn in group:
+                # Collect ALL arrays in the entire closure hierarchy, not just
+                # the top level — this catches deeply-nested pre-allocated arrays.
+                for arr in _all_closure_arrays(kterm_fn):
+                    assert arr.device == expected_device, (
+                        f"Expected array on {expected_device}, got {arr.device}"
+                    )
+
+    def test_put_closure_arrays_on_device_utility(self):
+        """put_closure_arrays_on_device correctly transfers nested JAX arrays."""
+        devices = _multi_cpu_devices(2)
+        target_device = devices[1]
+
+        # Build a chain of closures simulating makegp_fourier's pattern:
+        #   outer fn → middle fn → inner fn with a pre-allocated array
+        prealloc = jnp.array(np.ones(5))  # lives on devices[0] by default
+        assert prealloc.device == devices[0], "Pre-condition: array starts on devices[0]"
+
+        def inner(params):
+            return params['x'] * prealloc
+
+        inner.params = ['x']
+
+        def outer(params):
+            return inner(params)
+
+        outer.params = ['x']
+
+        transferred = gpu_utils.put_closure_arrays_on_device(outer, target_device)
+
+        # The pre-allocated array in inner's closure should now be on target_device.
+        all_arrs = _all_closure_arrays(transferred)
+        assert len(all_arrs) > 0, "Should find at least one JAX array in closure"
+        for arr in all_arrs:
+            assert arr.device == target_device, (
+                f"Expected array on {target_device}, got {arr.device}"
+            )
+
+    def test_mixed_no_globalgp_and_globalgp_consistency(self):
+        """Pre-allocated freq arrays work correctly in both no-globalgp and globalgp paths."""
+        devices = _multi_cpu_devices(2)
+        n_psr = 4
+        psls_freq = [_make_test_psl_with_prealloc_freq(i) for i in range(n_psr)]
+        gbl_no_ggp = ds.GlobalLikelihood(psls_freq)
+
+        psls_freq2 = [_make_test_psl_with_prealloc_freq(i) for i in range(n_psr)]
+        globalgp = _make_test_globalgp(n_psr)
+        gbl_ggp = ds.GlobalLikelihood(psls_freq2, globalgp=globalgp)
+
+        params = {f'log_amp_{i}': jnp.array(0.1 * i) for i in range(n_psr)}
+        params['gp_log_amp'] = jnp.array(-1.0)
+
+        # Both paths should give results matching single-device logL.
+        single_no_ggp = float(gbl_no_ggp.logL({k: v for k, v in params.items() if k != 'gp_log_amp'}))
+        fn_no_ggp = gbl_no_ggp.gpu_logL(devices=devices, use_pmap=True)
+        multi_no_ggp = float(fn_no_ggp({k: v for k, v in params.items() if k != 'gp_log_amp'}))
+        assert np.isclose(single_no_ggp, multi_no_ggp, rtol=1e-5), (
+            f"no-globalgp: single={single_no_ggp}, multi={multi_no_ggp}"
+        )
+
+        single_ggp = float(gbl_ggp.logL(params))
+        fn_ggp = gbl_ggp.gpu_logL(devices=devices, use_pmap=True)
+        multi_ggp = float(fn_ggp(params))
+        assert np.isclose(single_ggp, multi_ggp, rtol=1e-5), (
+            f"globalgp: single={single_ggp}, multi={multi_ggp}"
         )
 
 

@@ -6,6 +6,7 @@ primitives (pmap, device_put, etc.).
 """
 
 import os
+import types
 import warnings
 from typing import List, Optional, Tuple, Any
 
@@ -411,3 +412,115 @@ def get_device_mesh(num_devices: Optional[int] = None) -> Any:
     except ImportError:
         warnings.warn("JAX Mesh not available. Requires JAX >= 0.4.0")
         return None
+
+
+def _put_value_on_device(v: Any, device: Any, visited: set) -> Any:
+    """Transfer a single closure value to device, recursing into callables and containers.
+
+    Args:
+        v: The value extracted from a closure cell.
+        device: Target JAX device.
+        visited: Set of function ``id``\\s already processed, used by the
+            outer :func:`put_closure_arrays_on_device` call to prevent
+            infinite recursion when closures contain self-referential objects.
+    """
+    if isinstance(v, jax.Array):
+        return jax.device_put(v, device)
+    elif callable(v) and hasattr(v, '__closure__') and v.__closure__:
+        return put_closure_arrays_on_device(v, device, visited)
+    elif isinstance(v, list):
+        new_items = [_put_value_on_device(item, device, visited) for item in v]
+        if any(n is not o for n, o in zip(new_items, v)):
+            return new_items
+        return v
+    elif isinstance(v, tuple):
+        new_items = tuple(_put_value_on_device(item, device, visited) for item in v)
+        if any(n is not o for n, o in zip(new_items, v)):
+            return new_items
+        return v
+    elif isinstance(v, dict):
+        new_dict = {k: _put_value_on_device(val, device, visited) for k, val in v.items()}
+        if any(new_dict[k] is not v[k] for k in v):
+            return new_dict
+        return v
+    else:
+        return v
+
+
+def put_closure_arrays_on_device(fn: Any, device: Any, _visited: Optional[set] = None) -> Any:
+    """Recursively transfer all JAX arrays captured in a function's closure to a device.
+
+    Signal functions (e.g. from ``makegp_fourier``) pre-allocate JAX arrays
+    such as frequency grids and F-matrices at model-setup time.  Those arrays
+    land on the default device (typically GPU:0) long before ``gpu_logL`` is
+    called.  When ``gpu_logL`` distributes pulsars across devices, the
+    per-device kernel closures must also carry their captured arrays on the
+    right device; otherwise a cross-device binary operation forces all
+    computation back to GPU:0.
+
+    This function walks the full Python closure hierarchy of *fn* and replaces
+    every ``jax.Array`` it finds with a copy placed on *device*.  Nested
+    callables that themselves carry closures are handled recursively.  Numpy
+    arrays and plain Python values are left untouched.
+
+    Args:
+        fn: A Python callable (function or lambda) whose closure may contain
+            JAX arrays that need to be transferred.
+        device: The target JAX device (e.g. ``jax.devices('gpu')[1]``).
+        _visited: Internal set used to break cycles; callers should omit this.
+
+    Returns:
+        A new callable equivalent to *fn* but with all closed-over
+        ``jax.Array`` objects residing on *device*.  If *fn* has no closure,
+        or if none of the closure values need moving, *fn* is returned
+        unchanged.
+
+    Example:
+        >>> # After gpu_logL has built a per-device kernel closure, ensure
+        >>> # that deeply-nested prior functions also have their frequency
+        >>> # arrays on the correct device:
+        >>> kterm = put_closure_arrays_on_device(kterm, device)
+    """
+    if _visited is None:
+        _visited = set()
+
+    fn_id = id(fn)
+    if fn_id in _visited:
+        return fn
+    _visited.add(fn_id)
+
+    if not (hasattr(fn, '__closure__') and fn.__closure__):
+        return fn
+
+    new_cells = []
+    changed = False
+
+    for cell in fn.__closure__:
+        try:
+            v = cell.cell_contents
+        except ValueError:
+            # Empty cell (unbound free variable) — keep as-is.
+            new_cells.append(cell)
+            continue
+
+        new_v = _put_value_on_device(v, device, _visited)
+        if new_v is not v:
+            changed = True
+            new_cells.append(types.CellType(new_v))
+        else:
+            new_cells.append(cell)
+
+    if not changed:
+        return fn
+
+    new_fn = types.FunctionType(
+        fn.__code__,
+        fn.__globals__,
+        fn.__name__,
+        fn.__defaults__,
+        tuple(new_cells),
+    )
+    new_fn.__kwdefaults__ = fn.__kwdefaults__
+    # Preserve custom attributes (.params, .vector, .type, etc.)
+    new_fn.__dict__.update(fn.__dict__)
+    return new_fn

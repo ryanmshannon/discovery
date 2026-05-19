@@ -574,8 +574,15 @@ class GlobalLikelihood:
                         # jnparray calls inside make_kernelproduct_vary will use
                         # jax.default_device(device) for static arrays while
                         # dynamic residuals are placed at evaluation time.
-                        psl.N.make_kernelproduct(
-                            psl.y if callable(psl.y) else jax.device_put(psl.y, device)
+                        # After construction, recursively transfer any pre-allocated
+                        # JAX arrays in nested closures (e.g. frequency grids from
+                        # makegp_fourier) that were created on GPU:0 at model-setup
+                        # time and would otherwise cause cross-device operations.
+                        gpu_utils.put_closure_arrays_on_device(
+                            psl.N.make_kernelproduct(
+                                psl.y if callable(psl.y) else jax.device_put(psl.y, device)
+                            ),
+                            device,
                         )
                         for psl in psls_list[start_idx:end_idx]
                     ]
@@ -722,9 +729,16 @@ class GlobalLikelihood:
                         # only affects *new* array allocation, so arrays that
                         # are already resident on GPU:0 (psl.y, Fmat) would
                         # otherwise keep the computation there.
-                        psl.N.make_kernelterms(
-                            jax.device_put(psl.y, device),
-                            jax.device_put(Fmat, device),
+                        # After construction, recursively transfer any pre-allocated
+                        # JAX arrays in nested closures (e.g. frequency grids from
+                        # makeglobalgp_fourier / makegp_fourier, ORF matrices, etc.)
+                        # that were created on GPU:0 at model-setup time.
+                        gpu_utils.put_closure_arrays_on_device(
+                            psl.N.make_kernelterms(
+                                jax.device_put(psl.y, device),
+                                jax.device_put(Fmat, device),
+                            ),
+                            device,
                         )
                         for psl, Fmat in psls_and_Fs[start_idx:end_idx]
                     ]
