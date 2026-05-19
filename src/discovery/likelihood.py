@@ -546,14 +546,14 @@ class GlobalLikelihood:
                 loglike.params = sorted(set.union(*[set(logl.params) for logl in logls]))
                 return loglike
             
-            # Build device-local closures so captured arrays (noise matrices,
-            # Cholesky factors, etc.) are placed on the target device at
-            # construction time, ensuring computations actually execute there.
+            # Build per-pulsar kernel term closures grouped by device, mirroring
+            # the globalgp construction pattern.  Always call make_kernelproduct
+            # fresh inside jax.default_device(device) — never use the cached
+            # psl.logL property — so that all captured JAX arrays land on the
+            # target device rather than on the primary device.  Explicitly move
+            # psl.y to the target device before the call so that intermediate
+            # arrays computed from y (FtNmy, ytNmy, …) are also placed there.
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
-
-            print("pulsars per device", pulsars_per_device)
-
-            print("device list", device_list)
 
             def make_dummy_logL():
                 def dummy_logL(params):
@@ -561,58 +561,49 @@ class GlobalLikelihood:
                 dummy_logL.params = []
                 return dummy_logL
 
-            # Build groups with device-local closures; keep a pre-padding list
-            # so that .params can be collected before dummies are added.
-            logl_groups = []
-            pre_padding_logls = []
+            kterm_groups = []
             for i, device in enumerate(device_list):
                 start_idx = i * pulsars_per_device
                 end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
-                group = []
                 with jax.default_device(device):
-                    for psl in psls_list[start_idx:end_idx]:
-                        if callable(psl.y):
-                            # Delay functions: psl.logL calls make_kernelproduct
-                            # at evaluation time, so device placement is
-                            # determined by the evaluation-time context.
-                            warnings.warn(
-                                f"Pulsar '{getattr(psl, 'name', psl)}' has a delay "
-                                "function. Its likelihood closure cannot be fully placed "
-                                "on the target device at construction time; only "
-                                "evaluation-time parameters will be moved. "
-                                "Use use_pmap=False for a sequential fallback.",
-                                UserWarning,
-                                stacklevel=2,
-                            )
-                            group.append(psl.logL)
-                        else:
-                            # Create a fresh closure with captured arrays on
-                            # this device so the computation runs there.
-                            # Explicitly move psl.y to the target device:
-                            # jax.default_device only affects *new* array
-                            # allocation, not arrays already resident on GPU:0.
-                            group.append(psl.N.make_kernelproduct(jax.device_put(psl.y, device)))
-                pre_padding_logls.extend(group)
-                logl_groups.append(group)
+                    group = [
+                        # For non-callable y: explicitly move psl.y to the
+                        # target device so that all intermediates computed
+                        # inside make_kernelproduct land there too.
+                        # For callable y (delay functions): pass psl.y directly;
+                        # jnparray calls inside make_kernelproduct_vary will use
+                        # jax.default_device(device) for static arrays while
+                        # dynamic residuals are placed at evaluation time.
+                        psl.N.make_kernelproduct(
+                            psl.y if callable(psl.y) else jax.device_put(psl.y, device)
+                        )
+                        for psl in psls_list[start_idx:end_idx]
+                    ]
+                kterm_groups.append(group)
 
-            max_group_size = max(len(g) for g in logl_groups)
-            for group in logl_groups:
+            # Collect params before padding so dummy closures don't interfere.
+            all_kterm_params = [kt.params for g in kterm_groups for kt in g]
+
+            max_group_size = max(len(g) for g in kterm_groups)
+            for group in kterm_groups:
                 while len(group) < max_group_size:
                     group.append(make_dummy_logL())
 
             def loglike(params):
-                results = []
-                for logl_group, device in zip(logl_groups, device_list):
+                # Evaluate per-pulsar kernel terms on each device, then gather
+                # all scalar contributions on the primary device and sum them.
+                # This mirrors the globalgp evaluation pattern: compute terms
+                # per device, move results to device_list[0], aggregate.
+                all_terms = []
+                for kterm_group, device in zip(kterm_groups, device_list):
                     params_on_device = jax.device_put(params, device)
                     with jax.default_device(device):
-                        group_sum = sum(logl(params_on_device) for logl in logl_group)
-                        print(device, group_sum)
-                    # Move the partial sum to the primary device before
-                    # aggregating to avoid cross-device operation errors.
-                    results.append(jax.device_put(group_sum, device_list[0]))
-                return sum(results)
+                        group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                    for t in group_terms:
+                        all_terms.append(jax.device_put(t, device_list[0]))
+                return sum(all_terms)
 
-            loglike.params = sorted(set.union(*[set(logl.params) for logl in pre_padding_logls]))
+            loglike.params = sorted(set.union(*[set(p) for p in all_kterm_params]) if all_kterm_params else set())
             
         else:
             # Complex case: with global GP
