@@ -246,6 +246,50 @@ class TestMultiDeviceNoGlobalGP:
             f"single={single}, multi={multi}"
         )
 
+    def test_fresh_closures_not_cached_logl(self):
+        """gpu_logL builds fresh per-device closures, not cached psl.logL.
+
+        Accessing psl.logL before calling gpu_logL caches arrays on the
+        primary device.  The use_pmap=True path must build new closures via
+        make_kernelproduct inside jax.default_device(device) so that each
+        device's captured arrays land on the correct device.
+        """
+        devices = _multi_cpu_devices(2)
+        n_psr = 4
+        psls = [_make_test_psl(i) for i in range(n_psr)]
+        gbl = ds.GlobalLikelihood(psls)
+        params = {f'log_amp_{i}': jnp.array(float(i) * 0.1) for i in range(n_psr)}
+
+        # Force psl.logL to be cached on device[0] (primary).
+        _ = [psl.logL for psl in psls]
+
+        # gpu_logL must still produce the correct answer even though psl.logL
+        # has been pre-cached, because it rebuilds closures from scratch.
+        single = float(gbl.logL(params))
+        fn = gbl.gpu_logL(devices=devices, use_pmap=True)
+        multi = float(fn(params))
+        assert np.isclose(single, multi, rtol=1e-5), (
+            f"single={single}, multi={multi}"
+        )
+
+        # Verify the closures' arrays are on their assigned devices.
+        kterm_groups, device_list = _extract_closure_groups(fn)
+        assert kterm_groups is not None
+        assert device_list is not None
+        for group, expected_device in zip(kterm_groups, device_list):
+            for kterm_fn in group:
+                if not kterm_fn.__closure__:
+                    continue
+                for cell in kterm_fn.__closure__:
+                    try:
+                        v = cell.cell_contents
+                    except ValueError:
+                        continue
+                    if isinstance(v, jax.Array):
+                        assert v.device == expected_device, (
+                            f"Expected array on {expected_device}, got {v.device}"
+                        )
+
 
 # ---------------------------------------------------------------------------
 # Multi-device correctness tests (with global GP)
