@@ -18,7 +18,7 @@ def makemodel_transformed(mylogl, transform=prior.makelogtransform_uniform, prio
         pars = numpyro.sample('pars', dist.Normal(0, 10).expand([parlen]))
         logl = logx.logL(pars)
         numpyro.deterministic('log_likelihood', logl)
-        numpyro.factor('logl', logx(pars))
+        numpyro.factor('logl', logl + logx.logprior(pars))
     numpyro_model.to_df = lambda chain: logx.to_df(chain['pars'])
 
     return numpyro_model
@@ -36,13 +36,15 @@ def makemodel(mylogl, priordict={}):
 
 
 def makesampler_nuts(numpyro_model, num_warmup=512, num_samples=1024, num_chains=1, **kwargs):
-    nutsargs = dict(max_tree_depth=8, dense_mass=False,
-                    forward_mode_differentiation=False, target_accept_prob=0.8,
-                    **{arg: val for arg in kwargs.items() if arg in inspect.getfullargspec(infer.NUTS).args})
+    nuts_defaults = dict(max_tree_depth=8, dense_mass=False,
+                         forward_mode_differentiation=False, target_accept_prob=0.8)
+    nuts_valid = {arg: val for arg, val in kwargs.items() if arg in inspect.getfullargspec(infer.NUTS).args}
+    nutsargs = {**nuts_defaults, **nuts_valid}
 
-    mcmcargs = dict(num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
-                    chain_method='vectorized', progress_bar=True,
-                    **{arg: val for arg in kwargs.items() if arg in inspect.getfullargspec(infer.MCMC).kwonlyargs})
+    mcmc_defaults = dict(num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains,
+                         chain_method='vectorized', progress_bar=True)
+    mcmc_valid = {arg: val for arg, val in kwargs.items() if arg in inspect.getfullargspec(infer.MCMC).kwonlyargs}
+    mcmcargs = {**mcmc_defaults, **mcmc_valid}
 
     sampler = infer.MCMC(infer.NUTS(numpyro_model, **nutsargs), **mcmcargs)
 
