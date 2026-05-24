@@ -561,10 +561,14 @@ def make_jit_compatible_loglike(loglike_eager, params_list, primary_device=None)
 
         def _fwd_callback(*flat_args):
             p = treedef.unflatten(flat_args)
-            return loglike_eager(p)
+            result = loglike_eager(p)
+            # Ensure result matches the declared dtype to avoid callback errors
+            return jnp.asarray(result, dtype=result_dtype)
 
         result_shape = jax.ShapeDtypeStruct((), result_dtype)
-        result = jax.pure_callback(_fwd_callback, result_shape, *flat)
+        result = jax.pure_callback(
+            _fwd_callback, result_shape, *flat, vmap_method='sequential'
+        )
         return jax.device_put(result, primary_device)
 
     def loglike_fwd(params):
@@ -578,10 +582,14 @@ def make_jit_compatible_loglike(loglike_eager, params_list, primary_device=None)
         def _bwd_callback(*flat_args):
             p = treedef.unflatten(flat_args)
             grads = jax.grad(loglike_eager)(p)
-            return jax.tree_util.tree_leaves(grads)
+            grad_leaves = jax.tree_util.tree_leaves(grads)
+            # Ensure gradient dtypes match their corresponding input dtypes
+            return [jnp.asarray(gl, dtype=fa.dtype) for gl, fa in zip(grad_leaves, flat_args)]
 
         grad_shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype) for x in flat]
-        flat_grads = jax.pure_callback(_bwd_callback, grad_shapes, *flat)
+        flat_grads = jax.pure_callback(
+            _bwd_callback, grad_shapes, *flat, vmap_method='sequential'
+        )
         grad_dict = treedef.unflatten(flat_grads)
         return (jax.tree_util.tree_map(lambda x: x * g, grad_dict),)
 
