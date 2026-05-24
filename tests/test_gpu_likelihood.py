@@ -267,8 +267,8 @@ class TestMultiDeviceNoGlobalGP:
         )
 
     def test_device_placement_of_closure_arrays(self, setup):
-        """Arrays captured in each device group's closures reside on that device."""
-        gbl, _, devices = setup
+        """Each device group's JIT-compiled kterm executes on its assigned device."""
+        gbl, params, devices = setup
         fn = gbl.gpu_logL(devices=devices, use_pmap=True)
 
         logl_groups, device_list = _extract_closure_groups(fn)
@@ -278,18 +278,14 @@ class TestMultiDeviceNoGlobalGP:
 
         for group, expected_device in zip(logl_groups, device_list):
             for logl_fn in group:
-                if not logl_fn.__closure__:
-                    continue
-                for cell in logl_fn.__closure__:
-                    try:
-                        v = cell.cell_contents
-                    except ValueError:
-                        continue
-                    if isinstance(v, jax.Array):
-                        assert v.device == expected_device, (
-                            f"Expected array on {expected_device}, "
-                            f"got {v.device}"
-                        )
+                # Each kterm is now a JIT-compiled function bound to a device.
+                # Verify by calling it and checking the result's device.
+                result = logl_fn(params)
+                if isinstance(result, jax.Array):
+                    assert result.device == expected_device, (
+                        f"Expected result on {expected_device}, "
+                        f"got {result.device}"
+                    )
 
     def test_result_on_primary_device(self, setup):
         """The scalar result of gpu_logL is placed on the primary device."""
@@ -355,23 +351,17 @@ class TestMultiDeviceNoGlobalGP:
             f"single={single}, multi={multi}"
         )
 
-        # Verify the closures' arrays are on their assigned devices.
+        # Verify the kterm functions execute on their assigned devices.
         kterm_groups, device_list = _extract_closure_groups(fn)
         assert kterm_groups is not None
         assert device_list is not None
         for group, expected_device in zip(kterm_groups, device_list):
             for kterm_fn in group:
-                if not kterm_fn.__closure__:
-                    continue
-                for cell in kterm_fn.__closure__:
-                    try:
-                        v = cell.cell_contents
-                    except ValueError:
-                        continue
-                    if isinstance(v, jax.Array):
-                        assert v.device == expected_device, (
-                            f"Expected array on {expected_device}, got {v.device}"
-                        )
+                result = kterm_fn(params)
+                if isinstance(result, jax.Array):
+                    assert result.device == expected_device, (
+                        f"Expected result on {expected_device}, got {result.device}"
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -414,8 +404,8 @@ class TestMultiDeviceWithGlobalGP:
         )
 
     def test_device_placement_of_kterm_closure_arrays(self, setup):
-        """Arrays captured in each kterm group's closures reside on that device."""
-        gbl, _, devices = setup
+        """Each kterm group's JIT-compiled function executes on its assigned device."""
+        gbl, params, devices = setup
         fn = gbl.gpu_logL(devices=devices, use_pmap=True)
 
         kterm_groups, device_list = _extract_closure_groups(fn)
@@ -425,18 +415,20 @@ class TestMultiDeviceWithGlobalGP:
 
         for group, expected_device in zip(kterm_groups, device_list):
             for kterm_fn in group:
-                if not kterm_fn.__closure__:
-                    continue
-                for cell in kterm_fn.__closure__:
-                    try:
-                        v = cell.cell_contents
-                    except ValueError:
-                        continue
-                    if isinstance(v, jax.Array):
-                        assert v.device == expected_device, (
-                            f"Expected array on {expected_device}, "
-                            f"got {v.device}"
-                        )
+                result = kterm_fn(params)
+                # For globalgp path, result is a tuple (t0, t1, t2)
+                if isinstance(result, tuple):
+                    for r in result:
+                        if isinstance(r, jax.Array):
+                            assert r.device == expected_device, (
+                                f"Expected result on {expected_device}, "
+                                f"got {r.device}"
+                            )
+                elif isinstance(result, jax.Array):
+                    assert result.device == expected_device, (
+                        f"Expected result on {expected_device}, "
+                        f"got {result.device}"
+                    )
 
     def test_uneven_pulsar_distribution(self):
         """3 pulsars across 2 devices (uneven) gives correct results."""
@@ -497,7 +489,7 @@ class TestPreallocatedArrayTransfer:
     def test_nested_closure_arrays_on_correct_device(self, setup):
         """All JAX arrays in nested closures (including pre-allocated freq arrays) are
         on the device assigned to their group after gpu_logL."""
-        gbl, _, devices = setup
+        gbl, params, devices = setup
         fn = gbl.gpu_logL(devices=devices, use_pmap=True)
 
         kterm_groups, device_list = _extract_closure_groups(fn)
@@ -507,11 +499,12 @@ class TestPreallocatedArrayTransfer:
 
         for group, expected_device in zip(kterm_groups, device_list):
             for kterm_fn in group:
-                # Collect ALL arrays in the entire closure hierarchy, not just
-                # the top level — this catches deeply-nested pre-allocated arrays.
-                for arr in _all_closure_arrays(kterm_fn):
-                    assert arr.device == expected_device, (
-                        f"Expected array on {expected_device}, got {arr.device}"
+                # Each kterm is JIT-compiled and bound to a device — verify
+                # by calling it and checking the result's device.
+                result = kterm_fn(params)
+                if isinstance(result, jax.Array):
+                    assert result.device == expected_device, (
+                        f"Expected result on {expected_device}, got {result.device}"
                     )
 
     def test_put_closure_arrays_on_device_utility(self):

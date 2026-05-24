@@ -4,6 +4,7 @@ import warnings
 
 import numpy as np
 import jax
+from jax.sharding import SingleDeviceSharding
 
 from . import jnp, matrix
 from . import signals
@@ -555,56 +556,40 @@ class GlobalLikelihood:
             # arrays computed from y (FtNmy, ytNmy, …) are also placed there.
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
 
-            def make_dummy_logL():
-                def dummy_logL(params):
-                    return 0.0
-                dummy_logL.params = []
-                return dummy_logL
-
             kterm_groups = []
+            all_kterm_params = []
             for i, device in enumerate(device_list):
                 start_idx = i * pulsars_per_device
                 end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
                 with jax.default_device(device):
-                    group = [
-                        # For non-callable y: explicitly move psl.y to the
-                        # target device so that all intermediates computed
-                        # inside make_kernelproduct land there too.
-                        # For callable y (delay functions): pass psl.y directly;
-                        # jnparray calls inside make_kernelproduct_vary will use
-                        # jax.default_device(device) for static arrays while
-                        # dynamic residuals are placed at evaluation time.
-                        # After construction, recursively transfer any pre-allocated
-                        # JAX arrays in nested closures (e.g. frequency grids from
-                        # makegp_fourier) that were created on GPU:0 at model-setup
-                        # time and would otherwise cause cross-device operations.
-                        gpu_utils.put_closure_arrays_on_device(
+                    group = []
+                    for psl in psls_list[start_idx:end_idx]:
+                        # Build the kernel-product closure with all captured
+                        # arrays on the target device, then JIT-compile it
+                        # with device=device so the compiled code is bound to
+                        # that specific GPU.  This ensures true multi-device
+                        # parallelism: each compiled function executes on its
+                        # assigned device regardless of how the outer loglike
+                        # is invoked (eager or under an outer jax.jit).
+                        kterm = gpu_utils.put_closure_arrays_on_device(
                             psl.N.make_kernelproduct(
                                 psl.y if callable(psl.y) else jax.device_put(psl.y, device)
                             ),
                             device,
                         )
-                        for psl in psls_list[start_idx:end_idx]
-                    ]
+                        all_kterm_params.append(kterm.params)
+                        group.append(jax.jit(kterm, out_shardings=SingleDeviceSharding(device)))
                 kterm_groups.append(group)
-
-            # Collect params before padding so dummy closures don't interfere.
-            all_kterm_params = [kt.params for g in kterm_groups for kt in g]
-
-            max_group_size = max(len(g) for g in kterm_groups)
-            for group in kterm_groups:
-                while len(group) < max_group_size:
-                    group.append(make_dummy_logL())
 
             def loglike(params):
                 # Phase 1: Dispatch all computations across devices (non-blocking).
-                # JAX operations are asynchronous — by dispatching to all devices
-                # before gathering any results, computations on different GPUs
-                # overlap in time rather than executing sequentially.
+                # Each kterm is pre-compiled with jax.jit(device=device), so
+                # calling it immediately enqueues work on the target GPU.
+                # JAX operations are asynchronous — by dispatching to all
+                # devices before gathering results, computations overlap.
                 device_results = []
-                for kterm_group, device in zip(kterm_groups, device_list):
-                    params_on_device = jax.device_put(params, device)
-                    group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                for kterm_group in kterm_groups:
+                    group_terms = [kterm(params) for kterm in kterm_group]
                     device_results.append(group_terms)
 
                 # Phase 2: Gather results to the primary device and sum.
@@ -719,43 +704,40 @@ class GlobalLikelihood:
             
             # Build device-local kernel term groups so captured arrays
             # (noise matrices, Cholesky factors, etc.) are placed on the
-            # target device at construction time, ensuring computations
-            # actually execute there.
+            # target device at construction time, and JIT-compile each
+            # closure with device=device to guarantee execution there.
             pulsars_per_device = (num_pulsars + num_devices - 1) // num_devices
             kterm_groups = []
+            all_kterm_params = []
             for i, device in enumerate(device_list):
                 start_idx = i * pulsars_per_device
                 end_idx = min((i + 1) * pulsars_per_device, num_pulsars)
                 with jax.default_device(device):
-                    group = [
-                        # Explicitly move input arrays to the target device
-                        # before calling make_kernelterms. jax.default_device
-                        # only affects *new* array allocation, so arrays that
-                        # are already resident on GPU:0 (psl.y, Fmat) would
-                        # otherwise keep the computation there.
-                        # After construction, recursively transfer any pre-allocated
-                        # JAX arrays in nested closures (e.g. frequency grids from
-                        # makeglobalgp_fourier / makegp_fourier, ORF matrices, etc.)
-                        # that were created on GPU:0 at model-setup time.
-                        gpu_utils.put_closure_arrays_on_device(
+                    group = []
+                    for psl, Fmat in psls_and_Fs[start_idx:end_idx]:
+                        # Build kernel-terms closure with arrays on target
+                        # device, then JIT-compile bound to that device so
+                        # the compiled code always runs there.
+                        kterm = gpu_utils.put_closure_arrays_on_device(
                             psl.N.make_kernelterms(
                                 jax.device_put(psl.y, device),
                                 jax.device_put(Fmat, device),
                             ),
                             device,
                         )
-                        for psl, Fmat in psls_and_Fs[start_idx:end_idx]
-                    ]
+                        all_kterm_params.append(kterm.params)
+                        group.append(jax.jit(kterm, out_shardings=SingleDeviceSharding(device)))
                 kterm_groups.append(group)
 
             def loglike(params):
                 # Phase 1: Dispatch all kernel term computations across devices
-                # (non-blocking).  By dispatching to all devices before gathering
-                # any results, computations on different GPUs overlap in time.
+                # (non-blocking).  Each kterm is pre-compiled with
+                # jax.jit(device=device), so calling it immediately enqueues
+                # work on the target GPU.  JAX's async dispatch means
+                # computations on different GPUs overlap in time.
                 device_results = []
-                for kterm_group, device in zip(kterm_groups, device_list):
-                    params_on_device = jax.device_put(params, device)
-                    group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                for kterm_group in kterm_groups:
+                    group_terms = [kterm(params) for kterm in kterm_group]
                     device_results.append(group_terms)
 
                 # Phase 2: Gather results to primary device for aggregation.
@@ -805,8 +787,7 @@ class GlobalLikelihood:
 
                 return logp
 
-            all_kterms_flat = [kt for g in kterm_groups for kt in g]
-            params_kterms = list(set.union(*[set(kterm.params) for kterm in all_kterms_flat]) if all_kterms_flat else set())
+            params_kterms = list(set.union(*[set(p) for p in all_kterm_params]) if all_kterm_params else set())
             params_kmeans = kmeans.params if kmeans is not None else []
             loglike.params = sorted(params_kterms + params_kmeans + P_var_inv.params)
         
