@@ -118,7 +118,7 @@ def common_noise(psrs, chain_dfs, fftInt=True, max_cadence_days=14, name="gw_crn
         #                        red=has_param(df, "red_noise"), dm=has_param(df, "dm_gp"), extra_gps=extra_gps)
 
 
-        print("Including pulsar", psr.name, "with model parameters:\n", m.logL.params)
+        print("Including pulsar", psr.name)
         psls.append(m)
 
     return ds.likelihood.GlobalLikelihood(psls)
@@ -126,11 +126,9 @@ def common_noise(psrs, chain_dfs, fftInt=True, max_cadence_days=14, name="gw_crn
 model = common_noise(psrs, chain_dfs, fftInt=True, max_cadence_days=max_cadence_days, name=model_name)
 
 logl_parallel = model.gpu_logL(use_pmap=True)
-#logl_parallel=model.gpu_logL()
-logl_jit=jax.jit(logl_parallel)
 
 
-#print("Model parameters:\n", logl_parallel.logL.params)
+#print("Model parameters:\n", logl_parallel.params)
 
 # Save results as a DataFrame
 save_name = "{0}/results/{1}_{2}_{3}".format(outdir, model_name, str(max_cadence_days), str(chain_number))
@@ -139,8 +137,7 @@ print("Saving results to", save_name)
 
 
 # Set up sampler, sample, and save results
-#npmodel = ds_numpyro.makemodel_transformed(model.logL)
-npmodel=  ds_numpyro.makemodel_transformed(logl_jit)
+npmodel=  ds_numpyro.makemodel_transformed(logl_parallel)
 sampler = ds_numpyro.makesampler_nuts(npmodel, num_warmup=512, num_samples=100)
 # start with random seed
 key = jax.random.PRNGKey( np.random.randint(0, 2**32 - 1) )
