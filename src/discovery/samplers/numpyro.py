@@ -102,6 +102,13 @@ def warmup_jit(logl_func):
     this function before ``sampler.run()`` provides clear progress feedback
     so that long compilation times are not mistaken for a hang.
 
+    When the likelihood has ``kterm_groups`` and ``kterm_devices`` attributes
+    (set by ``gpu_logL`` with ``use_pmap=True``), this function first
+    pre-compiles all per-device kernel term JITs concurrently across devices.
+    This avoids the bottleneck of sequential compilation that occurs when the
+    outer ``jax.jit`` triggers all inner per-device compilations one-by-one
+    through the ``pure_callback`` path.
+
     Args:
         logl_func: A likelihood function with a ``.params`` attribute (e.g.
             the return value of ``GlobalLikelihood.gpu_logL``).
@@ -120,6 +127,47 @@ def warmup_jit(logl_func):
             dummy[par] = jnp.zeros(l)
         else:
             dummy[par] = jnp.zeros(())
+
+    # Pre-compile per-device kernel terms concurrently if available.
+    # When gpu_logL(use_pmap=True) is used, each kterm is a jax.jit-wrapped
+    # closure pinned to a specific device.  Dispatching all of them without
+    # blocking allows JAX to compile across devices in parallel, rather than
+    # sequentially through the pure_callback path.
+    kterm_groups = getattr(logl_func, 'kterm_groups', None)
+    kterm_devices = getattr(logl_func, 'kterm_devices', None)
+    if kterm_groups and kterm_devices:
+        num_kterms = sum(len(g) for g in kterm_groups)
+        print(f"Pre-compiling {num_kterms} per-device kernel terms across "
+              f"{len(kterm_devices)} devices...", flush=True)
+        t0 = time.time()
+
+        # Dispatch all kterm forward evaluations without blocking.
+        # Each kterm compiles independently on its target device.
+        pending_results = []
+        for kterm_group, device in zip(kterm_groups, kterm_devices):
+            dev_dummy = {k: jax.device_put(v, device) for k, v in dummy.items()}
+            for kterm in kterm_group:
+                pending_results.append(kterm(dev_dummy))
+
+        # Now block until all compilations and executions finish.
+        jax.block_until_ready(pending_results)
+        print(f"  Per-device kernel compilation done in {time.time() - t0:.1f}s "
+              f"({num_kterms} terms)", flush=True)
+
+        # Pre-compile gradients of each kterm concurrently as well.
+        # The gradient is needed by NUTS/HMC and would otherwise compile
+        # sequentially on the first backward pass through the callback.
+        print(f"Pre-compiling {num_kterms} per-device kernel gradients...", flush=True)
+        t0 = time.time()
+        pending_grads = []
+        for kterm_group, device in zip(kterm_groups, kterm_devices):
+            dev_dummy = {k: jax.device_put(v, device) for k, v in dummy.items()}
+            for kterm in kterm_group:
+                pending_grads.append(jax.grad(kterm)(dev_dummy))
+
+        jax.block_until_ready(jax.tree_util.tree_leaves(pending_grads))
+        print(f"  Per-device gradient compilation done in {time.time() - t0:.1f}s",
+              flush=True)
 
     print("Compiling likelihood (forward pass)...", flush=True)
     t0 = time.time()
