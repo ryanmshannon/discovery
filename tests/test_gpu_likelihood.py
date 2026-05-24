@@ -574,7 +574,7 @@ class TestPreallocatedArrayTransfer:
 
         # Build a chain of closures simulating makegp_fourier's pattern:
         #   outer fn → middle fn → inner fn with a pre-allocated array
-        prealloc = jnp.array(np.ones(5))  # lives on devices[0] by default
+        prealloc = jax.device_put(jnp.array(np.ones(5)), devices[0])  # explicitly on devices[0]
         assert prealloc.device == devices[0], "Pre-condition: array starts on devices[0]"
 
         def inner(params):
