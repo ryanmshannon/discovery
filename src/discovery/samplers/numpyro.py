@@ -124,6 +124,7 @@ def warmup_jit(logl_func):
     print("Compiling likelihood (forward pass)...", flush=True)
     t0 = time.time()
     result = jax.jit(logl_func)(dummy)
+    print(f"  Forward result done in {time.time() - t0:.1f}s (logL = {float(result):.2f})")
     jax.block_until_ready(result)
     print(f"  Forward compilation done in {time.time() - t0:.1f}s (logL = {float(result):.2f})")
 
