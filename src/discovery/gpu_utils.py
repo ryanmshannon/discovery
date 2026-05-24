@@ -524,3 +524,66 @@ def put_closure_arrays_on_device(fn: Any, device: Any, _visited: Optional[set] =
     # Preserve custom attributes (.params, .vector, .type, etc.)
     new_fn.__dict__.update(fn.__dict__)
     return new_fn
+
+
+def make_jit_compatible_loglike(loglike_eager, params_list, primary_device=None):
+    """Wrap a multi-device eager loglike so it works under an outer ``jax.jit``.
+
+    When numpyro (or any framework) wraps a model in ``jax.jit``, per-device
+    inner jits with different ``out_shardings`` conflict with the outer
+    compilation.  This helper uses ``jax.pure_callback`` with a
+    ``jax.custom_vjp`` to break out of the trace while preserving:
+
+    * Multi-device execution (each per-device jit still runs on its GPU).
+    * Reverse-mode differentiation (needed by NUTS/HMC samplers).
+
+    Args:
+        loglike_eager: A callable ``(params: dict) -> scalar`` that internally
+            dispatches per-device jitted functions.  Must be differentiable
+            via ``jax.grad`` in eager mode.
+        params_list: List of parameter names (set on the returned function as
+            ``.params``).
+        primary_device: The device where the final scalar result lives.  If
+            ``None``, defaults to ``jax.devices()[0]``.
+
+    Returns:
+        A callable with the same signature and a ``.params`` attribute, safe
+        to call under an outer ``jax.jit`` and ``jax.grad``.
+    """
+    if primary_device is None:
+        primary_device = jax.devices()[0]
+
+    @jax.custom_vjp
+    def loglike(params):
+        flat, treedef = jax.tree_util.tree_flatten(params)
+        # Determine result dtype from the first parameter array.
+        result_dtype = flat[0].dtype if flat else jnp.float64
+
+        def _fwd_callback(*flat_args):
+            p = treedef.unflatten(flat_args)
+            return loglike_eager(p)
+
+        result_shape = jax.ShapeDtypeStruct((), result_dtype)
+        return jax.pure_callback(_fwd_callback, result_shape, *flat)
+
+    def loglike_fwd(params):
+        result = loglike(params)
+        return result, params
+
+    def loglike_bwd(params, g):
+        flat, treedef = jax.tree_util.tree_flatten(params)
+        result_dtype = flat[0].dtype if flat else jnp.float64
+
+        def _bwd_callback(*flat_args):
+            p = treedef.unflatten(flat_args)
+            grads = jax.grad(loglike_eager)(p)
+            return jax.tree_util.tree_leaves(grads)
+
+        grad_shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype) for x in flat]
+        flat_grads = jax.pure_callback(_bwd_callback, grad_shapes, *flat)
+        grad_dict = treedef.unflatten(flat_grads)
+        return (jax.tree_util.tree_map(lambda x: x * g, grad_dict),)
+
+    loglike.defvjp(loglike_fwd, loglike_bwd)
+    loglike.params = params_list
+    return loglike

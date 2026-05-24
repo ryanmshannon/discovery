@@ -176,17 +176,27 @@ def _extract_closure_groups(fn):
 
     The ``loglike`` function returned by ``gpu_logL`` closes over a list of
     :class:`jax.Device` objects and a list-of-lists of callable kernel
-    closures.  This helper locates those two objects by inspecting the
-    Python closure cells of *fn* and returns them as a 2-tuple.
+    closures.  This helper locates those two objects by inspecting attributes
+    or the Python closure cells of *fn* and returns them as a 2-tuple.
 
     Returns:
         ``(groups, device_list)`` where *groups* is a list of lists of
         callable closures and *device_list* is a list of :class:`jax.Device`.
         Either element may be ``None`` if it could not be found.
     """
-    groups = None
-    device_list = None
-    for cell in fn.__closure__:
+    # First try attribute-based access (new callback-wrapped loglike)
+    groups = getattr(fn, 'kterm_groups', None)
+    device_list = getattr(fn, 'devices', None) or getattr(fn, 'kterm_devices', None)
+
+    if groups is not None and device_list is not None:
+        return groups, device_list
+
+    # Fall back to closure introspection (legacy path)
+    closure = getattr(fn, '__closure__', None)
+    if closure is None:
+        return groups, device_list
+
+    for cell in closure:
         try:
             v = cell.cell_contents
         except ValueError:
@@ -362,6 +372,50 @@ class TestMultiDeviceNoGlobalGP:
                     assert result.device == expected_device, (
                         f"Expected result on {expected_device}, got {result.device}"
                     )
+
+    def test_works_under_outer_jit(self):
+        """gpu_logL(use_pmap=True) works correctly when called under an outer jax.jit.
+
+        This simulates the pattern used by numpyro's NUTS sampler, which wraps
+        the model (including loglike) in jax.jit for compilation.
+        """
+        devices = _multi_cpu_devices(2)
+        n_psr = 4
+        psls = [_make_test_psl(i) for i in range(n_psr)]
+        gbl = ds.GlobalLikelihood(psls)
+        params = {f'log_amp_{i}': jnp.array(0.1 * i) for i in range(n_psr)}
+
+        fn = gbl.gpu_logL(devices=devices, use_pmap=True)
+        eager_result = float(fn(params))
+
+        # Wrap in outer jax.jit (simulating numpyro)
+        jitted_fn = jax.jit(fn)
+        jitted_result = float(jitted_fn(params))
+        assert np.isclose(eager_result, jitted_result, rtol=1e-5), (
+            f"eager={eager_result}, jitted={jitted_result}"
+        )
+
+    def test_gradient_under_outer_jit(self):
+        """gpu_logL(use_pmap=True) supports jax.grad under an outer jax.jit.
+
+        This is required for HMC/NUTS samplers that differentiate the
+        log-likelihood inside a jitted potential energy function.
+        """
+        devices = _multi_cpu_devices(2)
+        n_psr = 4
+        psls = [_make_test_psl(i) for i in range(n_psr)]
+        gbl = ds.GlobalLikelihood(psls)
+        params = {f'log_amp_{i}': jnp.array(0.1 * i) for i in range(n_psr)}
+
+        fn = gbl.gpu_logL(devices=devices, use_pmap=True)
+
+        # Compute gradient under jax.jit
+        grad_fn = jax.jit(jax.grad(fn))
+        grads = grad_fn(params)
+
+        # Verify all gradient values are finite scalars
+        for k, v in grads.items():
+            assert jnp.isfinite(v), f"Gradient for {k} is not finite: {v}"
 
 
 # ---------------------------------------------------------------------------
