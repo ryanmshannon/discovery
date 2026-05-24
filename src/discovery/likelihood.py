@@ -597,15 +597,19 @@ class GlobalLikelihood:
                     group.append(make_dummy_logL())
 
             def loglike(params):
-                # Evaluate per-pulsar kernel terms on each device, then gather
-                # all scalar contributions on the primary device and sum them.
-                # This mirrors the globalgp evaluation pattern: compute terms
-                # per device, move results to device_list[0], aggregate.
-                all_terms = []
+                # Phase 1: Dispatch all computations across devices (non-blocking).
+                # JAX operations are asynchronous — by dispatching to all devices
+                # before gathering any results, computations on different GPUs
+                # overlap in time rather than executing sequentially.
+                device_results = []
                 for kterm_group, device in zip(kterm_groups, device_list):
                     params_on_device = jax.device_put(params, device)
-                    with jax.default_device(device):
-                        group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                    group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                    device_results.append(group_terms)
+
+                # Phase 2: Gather results to the primary device and sum.
+                all_terms = []
+                for group_terms in device_results:
                     for t in group_terms:
                         all_terms.append(jax.device_put(t, device_list[0]))
                 return sum(all_terms)
@@ -745,13 +749,18 @@ class GlobalLikelihood:
                 kterm_groups.append(group)
 
             def loglike(params):
-                # Compute kernel terms on each device, then move results to the
-                # primary device for aggregation to avoid cross-device errors.
-                all_terms = []
+                # Phase 1: Dispatch all kernel term computations across devices
+                # (non-blocking).  By dispatching to all devices before gathering
+                # any results, computations on different GPUs overlap in time.
+                device_results = []
                 for kterm_group, device in zip(kterm_groups, device_list):
                     params_on_device = jax.device_put(params, device)
-                    with jax.default_device(device):
-                        group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                    group_terms = [kterm(params_on_device) for kterm in kterm_group]
+                    device_results.append(group_terms)
+
+                # Phase 2: Gather results to primary device for aggregation.
+                all_terms = []
+                for group_terms in device_results:
                     for t0, t1, t2 in group_terms:
                         all_terms.append((
                             jax.device_put(t0, device_list[0]),
