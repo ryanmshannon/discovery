@@ -502,7 +502,13 @@ class TestPreallocatedArrayTransfer:
                 # Each kterm is JIT-compiled and bound to a device — verify
                 # by calling it and checking the result's device.
                 result = kterm_fn(params)
-                if isinstance(result, jax.Array):
+                if isinstance(result, tuple):
+                    for r in result:
+                        if isinstance(r, jax.Array):
+                            assert r.device == expected_device, (
+                                f"Expected result on {expected_device}, got {r.device}"
+                            )
+                elif isinstance(result, jax.Array):
                     assert result.device == expected_device, (
                         f"Expected result on {expected_device}, got {result.device}"
                     )
