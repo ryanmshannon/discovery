@@ -564,7 +564,8 @@ def make_jit_compatible_loglike(loglike_eager, params_list, primary_device=None)
             return loglike_eager(p)
 
         result_shape = jax.ShapeDtypeStruct((), result_dtype)
-        return jax.pure_callback(_fwd_callback, result_shape, *flat)
+        result = jax.pure_callback(_fwd_callback, result_shape, *flat)
+        return jax.device_put(result, primary_device)
 
     def loglike_fwd(params):
         result = loglike(params)
