@@ -137,10 +137,12 @@ print("Saving results to", save_name)
 
 
 # Set up sampler, sample, and save results
+ds_numpyro.warmup_jit(logl_parallel)
 npmodel=  ds_numpyro.makemodel_transformed(logl_parallel)
 sampler = ds_numpyro.makesampler_nuts(npmodel, num_warmup=512, num_samples=100)
 # start with random seed
 key = jax.random.PRNGKey( np.random.randint(0, 2**32 - 1) )
+print("Starting sampling...", flush=True)
 sampler.run(key)
 
 chain = sampler.to_df()

@@ -1,7 +1,10 @@
 import inspect
+import time
 import numpy as np
 import pandas as pd
 
+import jax
+import jax.numpy as jnp
 import numpyro
 from numpyro import infer
 from numpyro import distributions as dist
@@ -89,3 +92,45 @@ def makesampler_nuts(numpyro_model, num_warmup=512, num_samples=1024, num_chains
     sampler.make_plots = _make_plots
 
     return sampler
+
+
+def warmup_jit(logl_func):
+    """Trigger JIT compilation of the likelihood and its gradient before sampling.
+
+    On multi-GPU setups, the first evaluation of a ``gpu_logL`` function
+    involves compiling per-device kernels, which can take minutes. Calling
+    this function before ``sampler.run()`` provides clear progress feedback
+    so that long compilation times are not mistaken for a hang.
+
+    Args:
+        logl_func: A likelihood function with a ``.params`` attribute (e.g.
+            the return value of ``GlobalLikelihood.gpu_logL``).
+
+    Returns:
+        The (discarded) scalar log-likelihood evaluated at the prior midpoint,
+        useful as a sanity check.
+    """
+    params = logl_func.params
+
+    # Build a dummy parameter dict at the prior midpoint
+    dummy = {}
+    for par in params:
+        if '(' in par:
+            l = int(par[par.index('(') + 1:par.index(')')])
+            dummy[par] = jnp.zeros(l)
+        else:
+            dummy[par] = jnp.zeros(())
+
+    print("Compiling likelihood (forward pass)...", flush=True)
+    t0 = time.time()
+    result = jax.jit(logl_func)(dummy)
+    jax.block_until_ready(result)
+    print(f"  Forward compilation done in {time.time() - t0:.1f}s (logL = {float(result):.2f})")
+
+    print("Compiling likelihood (gradient)...", flush=True)
+    t0 = time.time()
+    grad_result = jax.jit(jax.grad(logl_func))(dummy)
+    jax.block_until_ready(jax.tree_util.tree_leaves(grad_result))
+    print(f"  Gradient compilation done in {time.time() - t0:.1f}s")
+
+    return result
